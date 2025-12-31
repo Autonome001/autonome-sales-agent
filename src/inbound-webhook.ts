@@ -17,7 +17,18 @@ import Anthropic from '@anthropic-ai/sdk';
 config();
 
 const app = express();
-app.use(express.json());
+
+// Custom middleware to capture raw body for Slack signature verification
+const rawBodySaver = (req: any, res: any, buf: Buffer, encoding: string) => {
+    if (buf && buf.length) {
+        req.rawBody = buf;
+    }
+};
+
+app.use(express.json({ verify: rawBodySaver }));
+app.use(express.urlencoded({ extended: true, verify: rawBodySaver }));
+
+import { handleSlackCommand, verifySlackRequest } from './slack/handler.js';
 
 // ============================================================================
 // Configuration
@@ -284,6 +295,28 @@ async function updateLeadWithReply(
 
     console.log(`✅ Lead updated: ${email} → ${newStatus} (${classification.category})`);
 }
+
+// ============================================================================
+// Slack Command Endpoint
+// ============================================================================
+
+app.post('/slack/command', (req, res, next) => {
+    // 1. Verify Request Signature
+    // Skip verification in development if explicitly allowed, or if secret is missing but we want to debug
+    // But for production safety, we should enforce it.
+
+    if (process.env.NODE_ENV === 'production' || process.env.SLACK_SIGNING_SECRET) {
+        if (!verifySlackRequest(req)) {
+            console.error('❌ Slack signature verification failed');
+            return res.status(401).send('Unauthorized');
+        }
+    } else {
+        console.warn('⚠️  Running without Slack signature verification (Dev / No Secret)');
+    }
+
+    next();
+}, handleSlackCommand);
+
 
 // ============================================================================
 // Webhook Endpoint
