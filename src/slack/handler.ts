@@ -84,10 +84,15 @@ export function verifySlackRequest(req: Request): boolean {
 }
 
 // ============================================================================
-// Command Handler
+// Command & Interaction Handler
 // ============================================================================
 
 export async function handleSlackCommand(req: Request, res: Response) {
+    // Check if it's an interaction (payload) or command (command)
+    if (req.body.payload) {
+        return handleInteraction(req, res);
+    }
+
     // 1. Immediate acknowledgement (required < 3000ms)
     // Slack expects immediate 200 OK.
     // We send a provisional message.
@@ -103,6 +108,102 @@ export async function handleSlackCommand(req: Request, res: Response) {
     // 2. Process in background
     processCommandInBackground(text, response_url, user_name).catch(err => {
         console.error('❌ Error processing background Slack command:', err);
+    });
+}
+
+/**
+ * Handle interactive components (buttons, etc.)
+ */
+async function handleInteraction(req: Request, res: Response) {
+    const payload = JSON.parse(req.body.payload);
+    const action = payload.actions[0];
+    const user = payload.user;
+
+    // Acknowledge immediately to remove the loading state
+    res.status(200).send();
+
+    console.log(`\n🖱️ Slack Interaction: ${action.action_id} by ${user.username}`);
+
+    if (action.action_id === 'approve_booking') {
+        const { leadId, reply } = JSON.parse(action.value);
+        await handleBookingApproval(payload.response_url, leadId, reply, user.username);
+    } else if (action.action_id === 'take_over_booking') {
+        const leadId = action.value;
+        await handleTakeOver(payload.response_url, leadId, user.username);
+    } else if (action.action_id === 'update_booking_draft') {
+        const leadId = action.value;
+        // Simple acknowledgment for now
+        await fetch(payload.response_url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                replace_original: false,
+                text: `📝 @${user.username} wants to update the draft. Please reply in this thread with the improved copy, and then manually send it.`
+            })
+        });
+    }
+}
+
+async function handleBookingApproval(responseUrl: string, leadId: string, reply: string, approver: string) {
+    // Dynamic import to avoid cycles
+    const { sendingAgent } = await import('../agents/sending/index.js');
+    const { leadsDb } = await import('../db/index.js');
+
+    try {
+        const lead = await leadsDb.findById(leadId);
+        if (!lead) throw new Error('Lead not found');
+
+        // Send the email
+        await sendingAgent.sendEmail({
+            leadId,
+            to: lead.email,
+            subject: `Re: Meeting Request`, // Ideally we have thread context
+            body: reply,
+            sender: lead.sender_email // Stickiness!
+        });
+
+        // Update Slack message
+        await fetch(responseUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                text: `✅ *Approved by ${approver}* - Reply sent!`,
+                replace_original: true, // Replace the buttons with success message
+                blocks: [
+                    {
+                        "type": "section",
+                        "text": { "type": "mrkdwn", "text": `✅ *Approved by ${approver}* - Reply sent to ${lead.email}!` }
+                    },
+                    {
+                        "type": "section",
+                        "text": { "type": "mrkdwn", "text": `> ${reply.replace(/\n/g, '\n> ')}` }
+                    }
+                ]
+            })
+        });
+    } catch (e: any) {
+        await fetch(responseUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                text: `❌ Error sending email: ${e.message}`,
+                response_type: 'ephemeral'
+            })
+        });
+    }
+}
+
+async function handleTakeOver(responseUrl: string, leadId: string, taker: string) {
+    const { leadsDb } = await import('../db/index.js');
+    await leadsDb.update(leadId, { status: 'manual_intervention' });
+
+    await fetch(responseUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            text: `🛑 *Taken over by ${taker}* - AI paused for this lead.`,
+            replace_original: true
+        })
     });
 }
 

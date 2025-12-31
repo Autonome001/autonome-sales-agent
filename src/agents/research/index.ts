@@ -1,6 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropicConfig, apifyConfig } from '../../config/index.js';
 import { leadsDb, eventsDb } from '../../db/index.js';
+import { googleSearch } from '../../tools/web-search.js';
+import { readUrlContent } from '../../tools/web-reader.js';
 import type { Lead, AgentResult } from '../../types/index.js';
 
 export interface ResearchData {
@@ -125,9 +127,30 @@ export class ResearchAgent {
         console.log(`\n🔬 Starting research for: ${lead.first_name} ${lead.last_name} (${lead.email})`);
 
         try {
-            // AI Analysis based on available data
-            console.log('\n🧠 Analyzing lead data...');
-            const analysis = await this.analyzeResearch(lead);
+            // Scraping external market signals (G2, Trustpilot)
+            console.log('\n🌍 Gathering external market signals...');
+            const companyName = lead.company_name || 'Unknown Company';
+
+            // Search for reviews
+            const [g2Results, trustpilotResults] = await Promise.all([
+                googleSearch(`${companyName} G2 reviews`),
+                googleSearch(`${companyName} Trustpilot reviews`)
+            ]);
+
+            const relevantUrl = g2Results[0]?.url || trustpilotResults[0]?.url;
+            let reviewsText = '';
+
+            if (relevantUrl) {
+                reviewsText = await readUrlContent(relevantUrl);
+                console.log(`   ✅ Extracted ${reviewsText.length} chars of review context from ${relevantUrl}`);
+            } else {
+                console.log('   ⚠️ No direct review sites found, skipping deep review analysis');
+            }
+
+            // AI Analysis based on available data AND scraped reviews
+            // Re-running analysis to include the new context
+            console.log('\n🧠 Re-analyzing lead data with market signals...');
+            const analysis = await this.analyzeResearch(lead, reviewsText);
 
             // Compile research data
             const researchData: ResearchData = {
@@ -135,13 +158,14 @@ export class ResearchAgent {
                     profile: null,
                     posts: [],
                 },
-                companyResearch: '',
+                companyResearch: `Scraped from: ${relevantUrl || 'None'}`,
                 personResearch: '',
-                trustpilotReviews: '',
-                citations: [],
-                analysis,
+                trustpilotReviews: reviewsText.substring(0, 500) + '...', // snippet
+                citations: relevantUrl ? [relevantUrl] : [],
+                analysis: analysis,
                 completedAt: new Date().toISOString(),
             };
+
 
             // Update lead in database
             await leadsDb.update(lead.id, {
@@ -196,7 +220,7 @@ export class ResearchAgent {
     /**
      * Analyze lead data using Claude
      */
-    private async analyzeResearch(lead: Lead): Promise<ResearchAnalysis> {
+    private async analyzeResearch(lead: Lead, reviewsContext: string = ''): Promise<ResearchAnalysis> {
         const researchContext = `
 ## Prospect Information
 - Name: ${lead.first_name} ${lead.last_name}
@@ -208,6 +232,9 @@ export class ResearchAgent {
 - Seniority: ${lead.seniority || 'Unknown'}
 - Website: ${lead.website_url || 'Unknown'}
 - LinkedIn: ${lead.linkedin_url || 'Not available'}
+
+## Market Signals (Reviews/Feedback)
+${reviewsContext ? reviewsContext.substring(0, 5000) : 'No external review data found.'}
 `;
 
         const response = await this.claude.messages.create({

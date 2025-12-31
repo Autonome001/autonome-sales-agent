@@ -147,14 +147,16 @@ export class BookingAgent {
 
         const meetingDate = new Date(lead.meeting_scheduled_at);
 
+        const shortCompany = this.cleanCompanyName(lead.company_name || '');
+
         const response = await this.claude.messages.create({
             model: 'claude-sonnet-4-20250514',
             max_tokens: 1024,
-            system: `You are writing a brief, warm meeting confirmation email. Keep it under 75 words. Be friendly and professional. Include the meeting details clearly.`,
+            system: `You are writing a brief, warm meeting confirmation email. Keep it under 75 words. Be friendly and professional. Include the meeting details clearly. Refer to the company naturally as "${shortCompany}".`,
             messages: [
                 {
                     role: 'user',
-                    content: `Write a confirmation email to ${lead.first_name} for our meeting scheduled on ${meetingDate.toLocaleString()}. Their company is ${lead.company_name || 'their company'}. Meeting link: ${lead.meeting_link || '[MEETING_LINK]'}`,
+                    content: `Write a confirmation email to ${lead.first_name} for our meeting scheduled on ${meetingDate.toLocaleString()}. Their company is ${shortCompany}. Meeting link: ${lead.meeting_link || '[MEETING_LINK]'}`,
                 },
             ],
         });
@@ -294,6 +296,128 @@ export class BookingAgent {
     }
 
     /**
+     * Request human review via Slack
+     */
+    async requestHumanReview(leadId: string, context: string, draftedReply: string): Promise<AgentResult> {
+        const { slackConfig } = await import('../../config/index.js');
+
+        if (!slackConfig.botToken || !slackConfig.channelId) {
+            console.warn('⚠️ Slack not configured, skipping human review request');
+            return { success: false, action: 'request_review', error: 'Slack not configured' };
+        }
+
+        const lead = await leadsDb.findById(leadId);
+        if (!lead) return { success: false, action: 'request_review', error: 'Lead not found' };
+
+        console.log(`\n📢 Sending Slack approval request for ${lead.first_name} ${lead.last_name}`);
+
+        const blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "📅 New Meeting Request / Reply",
+                    "emoji": true
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": `*Prospect:* ${lead.first_name} ${lead.last_name}\n*Company:* ${lead.company_name}\n*Status:* ${lead.status}`
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": `*Context:*\n${context}`
+                }
+            },
+            {
+                "type": "divider"
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": `*🤖 AI Drafted Reply:*\n>>>${draftedReply}`
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "approve & Send",
+                            "emoji": true
+                        },
+                        "style": "primary",
+                        "value": JSON.stringify({ action: 'approve_booking', leadId, reply: draftedReply }),
+                        "action_id": "approve_booking"
+                    },
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "Take Over",
+                            "emoji": true
+                        },
+                        "style": "danger",
+                        "value": leadId,
+                        "action_id": "take_over_booking"
+                    },
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "Update Draft",
+                            "emoji": true
+                        },
+                        "value": leadId,
+                        "action_id": "update_booking_draft"
+                    }
+                ]
+            }
+        ];
+
+        try {
+            const response = await fetch('https://slack.com/api/chat.postMessage', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${slackConfig.botToken}`
+                },
+                body: JSON.stringify({
+                    channel: slackConfig.channelId,
+                    text: `New Booking Request from ${lead.first_name} ${lead.last_name}`,
+                    blocks
+                })
+            });
+
+            const result = await response.json();
+            if (!result.ok) throw new Error(result.error);
+
+            return {
+                success: true,
+                action: 'request_review',
+                message: 'Slack request sent',
+                data: { ts: result.ts }
+            };
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : 'Unknown error';
+            console.error('❌ Failed to send Slack request:', msg);
+            return {
+                success: false,
+                action: 'request_review',
+                error: msg
+            };
+        }
+    }
+
+    /**
      * Get meetings needing reminders
      */
     async getMeetingsNeedingReminders(hoursBefore: number = 24): Promise<Lead[]> {
@@ -308,6 +432,25 @@ export class BookingAgent {
             const meetingDate = new Date(lead.meeting_scheduled_at);
             return meetingDate >= reminderStart && meetingDate <= reminderWindow;
         });
+    }
+
+    private cleanCompanyName(name: string): string {
+        if (!name) return 'your company';
+        let cleaned = name.replace(/\s*\(.*?\)\s*/g, ''); // Remove (Text)
+
+        // Remove common suffixes (case insensitive)
+        const suffixes = [
+            ',?\\s*Inc\\.?$', ',?\\s*LLC\\.?$', ',?\\s*Ltd\\.?$', ',?\\s*Limited$',
+            '\\s+Corp\\.?$', '\\s+Corporation$', '\\s+Group$', '\\s+Holdings$',
+            '\\s+Technologies$', '\\s+Tech$', '\\s+Solutions$', '\\s+Services$',
+            '\\s+Partners$', '\\s+Systems$', '\\s+Labs$', '\\s+Enterprises$'
+        ];
+
+        for (const suffix of suffixes) {
+            cleaned = cleaned.replace(new RegExp(suffix, 'i'), '');
+        }
+
+        return cleaned.trim();
     }
 }
 

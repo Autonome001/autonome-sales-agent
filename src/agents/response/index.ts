@@ -108,6 +108,11 @@ export class ResponseAgent {
                 reply_sentiment: classification.sentiment,
             });
 
+            // Special handling for meeting requests
+            if (classification.category === 'meeting_request') {
+                await this.handleMeetingRequest(lead, email);
+            }
+
             // Log event
             await eventsDb.log({
                 lead_id: lead.id,
@@ -146,6 +151,41 @@ export class ResponseAgent {
                 error: message,
             };
         }
+    }
+
+    /**
+     * Handle meeting request by drafting reply and asking for human review
+     */
+    private async handleMeetingRequest(lead: Lead, email: InboundEmail) {
+        console.log('📅 Handling meeting request - Drafting reply & requesting review...');
+
+        // Dynamic import to avoid cycles
+        const { bookingAgent } = await import('../booking/index.js');
+        const { config } = await import('../../config/index.js');
+
+        const response = await this.claude.messages.create({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 1024,
+            system: `You are a helpful sales assistant. The prospect has expressed interest in a meeting. 
+            Your goal is to get them to book a time or confirm a proposed time.
+            Keep the tone professional but friendly. 
+            Use the context of their email.
+            Include the scheduling link: ${config.config?.booking?.calendlyUrl || 'https://calendly.com/autonome/15min'}`,
+            messages: [
+                {
+                    role: 'user',
+                    content: `Prospect said: "${email.body}".\n\nDraft a reply to ${lead.first_name} to schedule the call.`
+                }
+            ]
+        });
+
+        const draftReply = response.content[0].type === 'text' ? response.content[0].text : '';
+
+        await bookingAgent.requestHumanReview(
+            lead.id,
+            `Received response: "${email.subject}"\n> ${email.body.substring(0, 200)}...`,
+            draftReply
+        );
     }
 
     /**
@@ -199,7 +239,7 @@ ${email.body}
             wrong_person: 'closed_lost',
             unsubscribe: 'unsubscribed',
             question: 'engaged',
-            meeting_request: 'meeting_scheduled',
+            meeting_request: 'meeting_negotiation',
             other: 'engaged',
         };
         return statusMap[category];

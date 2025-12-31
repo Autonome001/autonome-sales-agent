@@ -29,13 +29,43 @@ interface Sender {
     title: string;
 }
 
+
+import { ICP } from './config/icp.js';
+import { discoveryAgent } from './agents/discovery/index.js';
+
+async function runDiscoveryStage(limit: number): Promise<number> {
+    console.log('\n┌─────────────────────────────────────────────────────────────┐');
+    console.log('│ STAGE 0: DISCOVERY (Apify Scraping)                         │');
+    console.log('└─────────────────────────────────────────────────────────────┘');
+
+    const result = await discoveryAgent.executeScrape({
+        industries: ICP.industries,
+        jobTitles: ICP.jobTitles,
+        locations: ICP.locations,
+        maxResults: Math.min(limit, ICP.maxResultsPerRun)
+    });
+
+    if (!result.success || !result.data) {
+        // If it's just no leads, don't crash pipeline
+        if (result.totalFound === 0) {
+            console.log('   ⚠️ No new leads found matching criteria');
+            return 0;
+        }
+        console.error(`   ❌ Discovery failed: ${result.message}`);
+        throw new Error(result.message);
+    }
+
+    console.log(`   ✅ Discovery complete: ${result.data.new_leads} new leads added`);
+    return result.data.new_leads;
+}
+
 // Autonome Sales Team Senders
 const SENDERS: Sender[] = [
     { email: 'brian@autonome.us', name: 'Brian P.', title: 'Solutions Consultant' },
     { email: 'crystal@autonome.us', name: 'Crystal R.', title: 'Director of Client Services & Automation Strategy' },
     { email: 'johnnie@autonome.us', name: 'Johnnie T.', title: 'Account Executive' },
     { email: 'kevin@autonome.us', name: 'Kevin J.', title: 'Director of Partnerships' },
-    { email: 'jonathan@autonome.us', name: 'Jonathan', title: 'Account Executive' },
+    { email: 'jonathan@autonome.us', name: 'Jonathan R.', title: 'Account Executive' },
 ];
 
 // Booking link
@@ -625,7 +655,12 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
         return { researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [msg] };
     }
 
-    let researched = 0, emailsCreated = 0, emailsSent = 0;
+
+
+    let discovered = 0, researched = 0, emailsCreated = 0, emailsSent = 0;
+
+    try { discovered = await runDiscoveryStage(limit); }
+    catch (error) { errors.push(`Discovery: ${error}`); }
 
     try { researched = await runResearchStage(supabase, anthropic, limit); }
     catch (error) { errors.push(`Research: ${error}`); }
@@ -642,6 +677,7 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
 ┌─────────────────────────────────────────────────────────────┐
 │                    🏁 PIPELINE SUMMARY                      │
 ├─────────────────────────────────────────────────────────────┤
+│  🔎 Leads Discovered:      ${String(discovered).padStart(5)}                          │
 │  🔬 Leads Researched:      ${String(researched).padStart(5)}                          │
 │  📧 Email Sequences Created: ${String(emailsCreated).padStart(3)}                          │
 │  📤 Emails Sent:           ${String(emailsSent).padStart(5)}                          │

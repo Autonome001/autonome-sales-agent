@@ -195,17 +195,19 @@ export class OutreachAgent {
         const interests = analysis.interests || [];
         const uniqueFacts = analysis.uniqueFacts || [];
 
+        const shortCompany = this.cleanCompanyName(lead.company_name || '');
+
         return `
 ## PROSPECT INFORMATION
 - Name: ${lead.first_name} ${lead.last_name}
-- Company: ${lead.company_name || 'Unknown'}
+- Company: ${shortCompany} (Full: ${lead.company_name || 'Unknown'})
 - Job Title: ${lead.job_title || 'Unknown'}
 - Industry: ${lead.industry || 'Unknown'}
 - Location: ${lead.city || ''}, ${lead.country || ''}
 
 ## RESEARCH INSIGHTS
 ### Personal Profile
-${analysis.personalProfile || 'No personal profile available'}
+${analysis.personalizationOpportunities || 'No personal profile available'}
 
 ### Company Profile
 ${analysis.companyProfile || 'No company profile available'}
@@ -224,7 +226,29 @@ ${painPoints.length ? painPoints.map((p: any) => `- ${p.pain} → Solution: ${p.
 
 ## CALENDLY LINK (for Email 3 only)
 ${this.config.calendlyUrl}
+
+## WRITING INSTRUCTION
+Refers to the company as "${shortCompany}" to sound natural (e.g. "I saw ${shortCompany} is growing" instead of "I saw ${lead.company_name} is growing").
 `;
+    }
+
+    private cleanCompanyName(name: string): string {
+        if (!name) return 'your company';
+        let cleaned = name.replace(/\s*\(.*?\)\s*/g, ''); // Remove (Text)
+
+        // Remove common suffixes (case insensitive)
+        const suffixes = [
+            ',?\\s*Inc\\.?$', ',?\\s*LLC\\.?$', ',?\\s*Ltd\\.?$', ',?\\s*Limited$',
+            '\\s+Corp\\.?$', '\\s+Corporation$', '\\s+Group$', '\\s+Holdings$',
+            '\\s+Technologies$', '\\s+Tech$', '\\s+Solutions$', '\\s+Services$',
+            '\\s+Partners$', '\\s+Systems$', '\\s+Labs$', '\\s+Enterprises$'
+        ];
+
+        for (const suffix of suffixes) {
+            cleaned = cleaned.replace(new RegExp(suffix, 'i'), '');
+        }
+
+        return cleaned.trim();
     }
 
     private async generateWithClaude(context: string): Promise<EmailSequence> {

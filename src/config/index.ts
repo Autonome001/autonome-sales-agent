@@ -11,22 +11,29 @@ const ConfigSchema = z.object({
     anonKey: z.string().min(1),
     serviceRoleKey: z.string().min(1),
   }),
-  
+
   // Anthropic
   anthropic: z.object({
     apiKey: z.string().min(1),
   }),
-  
+
   // Apify
   apify: z.object({
     apiToken: z.string().min(1),
   }),
-  
+
   // Optional OpenAI
   openai: z.object({
     apiKey: z.string().optional(),
   }),
-  
+
+  // Slack (Optional but recommended)
+  slack: z.object({
+    botToken: z.string().optional(),
+    signingSecret: z.string().optional(),
+    channelId: z.string().optional(),
+  }),
+
   // App
   app: z.object({
     nodeEnv: z.enum(['development', 'production', 'test']).default('development'),
@@ -52,6 +59,11 @@ function loadConfig(): Config {
     openai: {
       apiKey: process.env.OPENAI_API_KEY,
     },
+    slack: {
+      botToken: process.env.SLACK_BOT_TOKEN,
+      signingSecret: process.env.SLACK_SIGNING_SECRET,
+      channelId: process.env.SLACK_CHANNEL_ID,
+    },
     app: {
       nodeEnv: process.env.NODE_ENV as 'development' | 'production' | 'test' || 'development',
       logLevel: process.env.LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error' || 'info',
@@ -73,4 +85,4 @@ function loadConfig(): Config {
 export const config = loadConfig();
 
 // Export individual configs for convenience
-export const { supabase: supabaseConfig, anthropic: anthropicConfig, apify: apifyConfig } = config;
+export const { supabase: supabaseConfig, anthropic: anthropicConfig, apify: apifyConfig, slack: slackConfig } = config;
