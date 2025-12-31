@@ -3,9 +3,6 @@ builder = "nixpacks"
 buildCommand = "npm install"
 
 [deploy]
-startCommand = "npm run start:scheduler"
-healthcheckPath = "/health"
-healthcheckTimeout = 300
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
 
@@ -20,3 +17,5 @@ startCommand = "npm run start:followups"
 [[services]]
 name = "webhook"
 startCommand = "npm run start:webhook"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
