@@ -31,7 +31,7 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
           industries: params.industries,
           limit: maxResults,
           // Optional: email validation if supported
-          email_status: ["verified"],
+          email_status: ["validated"],
         }),
       }
     );
