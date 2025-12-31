@@ -617,9 +617,11 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
         if (error) throw error;
         console.log('✅ Database connected');
         console.log(`📧 Sender rotation: ${SENDERS.map(s => s.name).join(', ')}`);
-    } catch (error) {
-        const msg = `Database connection failed: ${error}`;
+    } catch (error: any) {
+        const msg = `Database connection failed: ${error.message || JSON.stringify(error)}`;
         console.error(`❌ ${msg}`);
+        if (error.details) console.error(error.details);
+        if (error.hint) console.error(error.hint);
         return { researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [msg] };
     }
 
