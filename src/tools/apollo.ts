@@ -1,7 +1,7 @@
 import { apifyConfig } from '../config/index.js';
 import type { ApolloPerson, CreateLead } from '../types/index.js';
 
-const APIFY_APOLLO_ACTOR = 'code_crafter/leads-finder';
+const APIFY_APOLLO_ACTOR = 'code_crafter~leads-finder';
 const APIFY_BASE_URL = 'https://api.apify.com/v2';
 
 // ... (interfaces remain the same)
