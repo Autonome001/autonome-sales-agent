@@ -4,13 +4,47 @@ import type { ApolloPerson, CreateLead } from '../types/index.js';
 const APIFY_APOLLO_ACTOR = 'code_crafter~leads-finder';
 const APIFY_BASE_URL = 'https://api.apify.com/v2';
 
-// ... (interfaces remain the same)
+export interface ApolloSearchParams {
+  locations: string[];
+  industries: string[];
+  jobTitles: string[];
+  maxResults?: number;
+}
 
-// ... (buildApolloUrl function remains, useful for reference or if actor supports it)
+export interface ApolloScraperResult {
+  success: boolean;
+  totalFound: number;
+  leads: CreateLead[];
+  error?: string;
+}
+
+/**
+ * Transform Apollo API response to CreateLead format
+ */
+function transformApolloPerson(person: ApolloPerson, industry: string): CreateLead | null {
+  // Skip if no email
+  if (!person.email) return null;
+
+  return {
+    first_name: person.first_name || null,
+    last_name: person.last_name || null,
+    email: person.email.toLowerCase(),
+    phone: person.organization?.primary_phone?.sanitized_number ?? null,
+    linkedin_url: person.linkedin_url || null,
+    company_name: person.employment_history?.[0]?.organization_name ?? null,
+    job_title: person.employment_history?.[0]?.title ?? null,
+    seniority: person.seniority || null,
+    industry: industry.replace(/\+/g, ' '),
+    website_url: person.organization_website_url || null,
+    city: person.city || null,
+    state: person.state || null,
+    country: person.country || null,
+    source: 'apollo',
+  };
+}
 
 export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloScraperResult> {
   const maxResults = params.maxResults ?? 100;
-  // const apolloUrl = buildApolloUrl(params); // Legacy URL builder
 
   console.log('🔍 Scraping with Leads Finder (Apollo Alternative)...');
   console.log(`   Params: ${JSON.stringify(params)}`);
@@ -42,6 +76,11 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
     }
 
     const data: ApolloPerson[] = await response.json();
+
+    // Debug log to check the structure of the first item
+    if (data.length > 0) {
+      console.log('📄 First item sample:', JSON.stringify(data[0], null, 2));
+    }
 
     // Transform results
     const leads: CreateLead[] = [];
