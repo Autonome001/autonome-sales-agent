@@ -45,14 +45,21 @@ async function runDiscoveryStage(limit: number): Promise<number> {
         maxResults: Math.min(limit, ICP.maxResultsPerRun)
     });
 
-    if (!result.success || !result.data) {
-        // If it's just no leads, don't crash pipeline
-        if (result.totalFound === 0) {
-            console.log('   ⚠️ No new leads found matching criteria');
-            return 0;
-        }
+    // Handle discovery failures gracefully - don't crash the pipeline
+    if (!result.success) {
         console.error(`   ❌ Discovery failed: ${result.message}`);
-        throw new Error(result.message);
+        return 0; // Return 0 instead of throwing to let pipeline continue
+    }
+
+    if (!result.data) {
+        console.log('   ⚠️ No data returned from discovery');
+        return 0;
+    }
+
+    // Check for zero leads found (correct property path)
+    if (result.data.total_found === 0) {
+        console.log('   ⚠️ No new leads found matching criteria');
+        return 0;
     }
 
     console.log(`   ✅ Discovery complete: ${result.data.new_leads} new leads added`);
@@ -235,6 +242,7 @@ async function sendSlackNotification(
     config: SchedulerConfig
 ): Promise<void> {
     if (!config.enableSlack || !config.slackWebhookUrl) {
+        log('WARN', 'Slack notifications disabled - SLACK_WEBHOOK_URL not set');
         return;
     }
 
@@ -242,36 +250,115 @@ async function sendSlackNotification(
     const emoji = hasErrors ? '⚠️' : '✅';
     const status = hasErrors ? 'completed with errors' : 'completed successfully';
 
-    const message = {
-        blocks: [
-            {
-                type: 'header',
-                text: {
-                    type: 'plain_text',
-                    text: `${emoji} Autonome Pipeline ${status}`,
-                    emoji: true,
-                },
+    const blocks: any[] = [
+        {
+            type: 'header',
+            text: {
+                type: 'plain_text',
+                text: `${emoji} Autonome Pipeline ${status}`,
+                emoji: true,
             },
-            {
-                type: 'section',
-                fields: [
-                    { type: 'mrkdwn', text: `*Leads Researched:*\n${result.researched}` },
-                    { type: 'mrkdwn', text: `*Emails Created:*\n${result.emailsCreated}` },
-                    { type: 'mrkdwn', text: `*Emails Sent:*\n${result.emailsSent}` },
-                    { type: 'mrkdwn', text: `*Duration:*\n${result.duration.toFixed(1)}s` },
-                ],
+        },
+        {
+            type: 'section',
+            fields: [
+                { type: 'mrkdwn', text: `*Leads Researched:*\n${result.researched}` },
+                { type: 'mrkdwn', text: `*Emails Created:*\n${result.emailsCreated}` },
+                { type: 'mrkdwn', text: `*Emails Sent:*\n${result.emailsSent}` },
+                { type: 'mrkdwn', text: `*Duration:*\n${result.duration.toFixed(1)}s` },
+            ],
+        },
+    ];
+
+    // Include error details in notification
+    if (hasErrors) {
+        blocks.push({
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `*❌ Errors (${result.errors.length}):*\n${result.errors.slice(0, 5).map(e => `• ${String(e).slice(0, 200)}`).join('\n')}${result.errors.length > 5 ? `\n_...and ${result.errors.length - 5} more_` : ''}`,
             },
-        ],
-    };
+        });
+    }
+
+    const message = { blocks };
+
+    try {
+        const response = await fetch(config.slackWebhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(message),
+        });
+        if (!response.ok) {
+            log('ERROR', `Slack notification failed: HTTP ${response.status}`);
+        }
+    } catch (error) {
+        log('ERROR', `Failed to send Slack notification: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+/**
+ * Send critical failure notification to Slack when pipeline crashes
+ * This ensures you ALWAYS get notified, even on unhandled exceptions
+ */
+async function sendCriticalFailureNotification(
+    error: Error | string,
+    stage: string,
+    config: SchedulerConfig
+): Promise<void> {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    log('ERROR', `CRITICAL FAILURE [${stage}]: ${errorMessage}`);
+
+    if (!config.enableSlack || !config.slackWebhookUrl) {
+        log('WARN', 'Cannot send Slack notification - SLACK_WEBHOOK_URL not configured');
+        return;
+    }
+
+    const errorStack = error instanceof Error ? error.stack : undefined;
+
+    const blocks: any[] = [
+        {
+            type: 'header',
+            text: {
+                type: 'plain_text',
+                text: '🚨 CRITICAL: Pipeline Crashed',
+                emoji: true,
+            },
+        },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `*Stage:* ${stage}\n*Error:* ${errorMessage}`,
+            },
+        },
+        {
+            type: 'context',
+            elements: [
+                { type: 'mrkdwn', text: `⏰ ${new Date().toISOString()}` },
+            ],
+        },
+    ];
+
+    if (errorStack) {
+        blocks.push({
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `\`\`\`${errorStack.slice(0, 500)}${errorStack.length > 500 ? '...' : ''}\`\`\``,
+            },
+        });
+    }
 
     try {
         await fetch(config.slackWebhookUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(message),
+            body: JSON.stringify({ blocks }),
         });
-    } catch (error) {
-        log('WARN', 'Failed to send Slack notification');
+        log('INFO', 'Critical failure notification sent to Slack');
+    } catch (fetchError) {
+        log('ERROR', `Failed to send critical failure notification: ${fetchError}`);
     }
 }
 
@@ -660,16 +747,32 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
     let discovered = 0, researched = 0, emailsCreated = 0, emailsSent = 0;
 
     try { discovered = await runDiscoveryStage(limit); }
-    catch (error) { errors.push(`Discovery: ${error}`); }
+    catch (error) {
+        const msg = `Discovery: ${error instanceof Error ? error.message : String(error)}`;
+        errors.push(msg);
+        log('ERROR', msg);
+    }
 
     try { researched = await runResearchStage(supabase, anthropic, limit); }
-    catch (error) { errors.push(`Research: ${error}`); }
+    catch (error) {
+        const msg = `Research: ${error instanceof Error ? error.message : String(error)}`;
+        errors.push(msg);
+        log('ERROR', msg);
+    }
 
     try { emailsCreated = await runOutreachStage(supabase, anthropic, limit); }
-    catch (error) { errors.push(`Outreach: ${error}`); }
+    catch (error) {
+        const msg = `Outreach: ${error instanceof Error ? error.message : String(error)}`;
+        errors.push(msg);
+        log('ERROR', msg);
+    }
 
     try { emailsSent = await runSendingStage(supabase, limit); }
-    catch (error) { errors.push(`Sending: ${error}`); }
+    catch (error) {
+        const msg = `Sending: ${error instanceof Error ? error.message : String(error)}`;
+        errors.push(msg);
+        log('ERROR', msg);
+    }
 
     const duration = (Date.now() - startTime) / 1000;
 
@@ -720,8 +823,17 @@ function startScheduler(config: SchedulerConfig): void {
     const task = cron.schedule(
         config.schedule,
         async () => {
-            const result = await runPipeline(config.limit);
-            await sendSlackNotification(result, config);
+            try {
+                const result = await runPipeline(config.limit);
+                await sendSlackNotification(result, config);
+            } catch (error) {
+                // Catch any unhandled exceptions and send critical notification
+                await sendCriticalFailureNotification(
+                    error instanceof Error ? error : new Error(String(error)),
+                    'Pipeline Execution (scheduled)',
+                    config
+                );
+            }
         },
         { scheduled: true, timezone: config.timezone }
     );
@@ -747,11 +859,28 @@ async function main(): Promise<void> {
 ╚═══════════════════════════════════════════════════════════════╝
 `);
 
+    // Startup validation: warn if Slack notifications are disabled
+    if (!config.enableSlack) {
+        log('WARN', '⚠️  SLACK_WEBHOOK_URL not set - you will NOT receive failure notifications!');
+        log('WARN', '   Set SLACK_WEBHOOK_URL in your environment to enable alerts.');
+    } else {
+        log('SUCCESS', '✅ Slack notifications enabled');
+    }
+
     if (args.includes('--once') || args.includes('-o')) {
         log('INFO', 'Running pipeline once (--once flag)');
-        const result = await runPipeline(config.limit);
-        await sendSlackNotification(result, config);
-        process.exit(result.errors.length > 0 ? 1 : 0);
+        try {
+            const result = await runPipeline(config.limit);
+            await sendSlackNotification(result, config);
+            process.exit(result.errors.length > 0 ? 1 : 0);
+        } catch (error) {
+            await sendCriticalFailureNotification(
+                error instanceof Error ? error : new Error(String(error)),
+                'Pipeline (--once mode)',
+                config
+            );
+            process.exit(1);
+        }
     } else if (args.includes('--help') || args.includes('-h')) {
         console.log(`
 Usage: npx tsx src/scheduler.ts [options]
@@ -764,7 +893,7 @@ Environment Variables:
   PIPELINE_SCHEDULE    Cron expression (default: "0 9 * * *" = 9 AM daily)
   PIPELINE_TIMEZONE    Timezone (default: "America/New_York")
   PIPELINE_LIMIT       Max leads per stage (default: 10)
-  SLACK_WEBHOOK_URL    Slack webhook for notifications (optional)
+  SLACK_WEBHOOK_URL    Slack webhook for notifications (REQUIRED for alerts!)
 
 Senders Configured:
 ${SENDERS.map(s => `  - ${s.name} (${s.email}) - ${s.title}`).join('\n')}
@@ -775,7 +904,14 @@ ${SENDERS.map(s => `  - ${s.name} (${s.email}) - ${s.title}`).join('\n')}
     }
 }
 
-main().catch((error) => {
-    log('ERROR', 'Scheduler failed', { error });
+// Global error handler with notification
+main().catch(async (error) => {
+    const config = getSchedulerConfig();
+    log('ERROR', 'Scheduler crashed', { error: error instanceof Error ? error.message : String(error) });
+    await sendCriticalFailureNotification(
+        error instanceof Error ? error : new Error(String(error)),
+        'Scheduler Startup',
+        config
+    );
     process.exit(1);
 });

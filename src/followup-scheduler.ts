@@ -78,6 +78,123 @@ function log(level: 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS', message: string, data
 }
 
 // ============================================================================
+// Slack Notifications
+// ============================================================================
+
+async function sendSlackNotification(result: FollowUpResult, config: FollowUpConfig): Promise<void> {
+    if (!config.slackWebhookUrl) {
+        log('WARN', 'Slack notifications disabled - SLACK_WEBHOOK_URL not set');
+        return;
+    }
+
+    const hasErrors = result.errors && result.errors.length > 0;
+    const emoji = hasErrors ? '⚠️' : '✅';
+    const status = hasErrors ? 'completed with errors' : 'completed successfully';
+
+    const blocks: any[] = [
+        {
+            type: 'header',
+            text: {
+                type: 'plain_text',
+                text: `${emoji} Follow-up Scheduler ${status}`,
+                emoji: true,
+            },
+        },
+        {
+            type: 'section',
+            fields: [
+                { type: 'mrkdwn', text: `*Email 2 Sent:*\n${result.email2Sent}` },
+                { type: 'mrkdwn', text: `*Email 3 Sent:*\n${result.email3Sent}` },
+            ],
+        },
+    ];
+
+    if (hasErrors) {
+        blocks.push({
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `*❌ Errors (${result.errors.length}):*\n${result.errors.slice(0, 5).map(e => `• ${String(e).slice(0, 200)}`).join('\n')}${result.errors.length > 5 ? `\n_...and ${result.errors.length - 5} more_` : ''}`,
+            },
+        });
+    }
+
+    try {
+        const response = await fetch(config.slackWebhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ blocks }),
+        });
+        if (!response.ok) {
+            log('ERROR', `Slack notification failed: HTTP ${response.status}`);
+        }
+    } catch (error) {
+        log('ERROR', `Failed to send Slack notification: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+async function sendCriticalFailureNotification(
+    error: Error | string,
+    stage: string,
+    config: FollowUpConfig
+): Promise<void> {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    log('ERROR', `CRITICAL FAILURE [${stage}]: ${errorMessage}`);
+
+    if (!config.slackWebhookUrl) {
+        log('WARN', 'Cannot send Slack notification - SLACK_WEBHOOK_URL not configured');
+        return;
+    }
+
+    const errorStack = error instanceof Error ? error.stack : undefined;
+
+    const blocks: any[] = [
+        {
+            type: 'header',
+            text: {
+                type: 'plain_text',
+                text: '🚨 CRITICAL: Follow-up Scheduler Crashed',
+                emoji: true,
+            },
+        },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `*Stage:* ${stage}\n*Error:* ${errorMessage}`,
+            },
+        },
+        {
+            type: 'context',
+            elements: [
+                { type: 'mrkdwn', text: `⏰ ${new Date().toISOString()}` },
+            ],
+        },
+    ];
+
+    if (errorStack) {
+        blocks.push({
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `\`\`\`${errorStack.slice(0, 500)}${errorStack.length > 500 ? '...' : ''}\`\`\``,
+            },
+        });
+    }
+
+    try {
+        await fetch(config.slackWebhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ blocks }),
+        });
+        log('INFO', 'Critical failure notification sent to Slack');
+    } catch (fetchError) {
+        log('ERROR', `Failed to send critical failure notification: ${fetchError}`);
+    }
+}
+
+// ============================================================================
 // Database Operations
 // ============================================================================
 
@@ -265,10 +382,36 @@ function startWatchMode(): void {
     const config = getConfig();
     log('INFO', '👀 Starting follow-up watcher (runs every hour)');
 
-    runFollowups();
+    // Startup validation
+    if (!config.slackWebhookUrl) {
+        log('WARN', '⚠️  SLACK_WEBHOOK_URL not set - you will NOT receive failure notifications!');
+    } else {
+        log('SUCCESS', '✅ Slack notifications enabled');
+    }
 
+    // Run immediately on start
+    runFollowups().then(result => {
+        sendSlackNotification(result, config);
+    }).catch(async error => {
+        await sendCriticalFailureNotification(
+            error instanceof Error ? error : new Error(String(error)),
+            'Initial run',
+            config
+        );
+    });
+
+    // Schedule hourly runs with error handling
     cron.schedule('0 * * * *', async () => {
-        await runFollowups();
+        try {
+            const result = await runFollowups();
+            await sendSlackNotification(result, config);
+        } catch (error) {
+            await sendCriticalFailureNotification(
+                error instanceof Error ? error : new Error(String(error)),
+                'Scheduled run',
+                config
+            );
+        }
     });
 
     log('INFO', 'Watcher started. Press Ctrl+C to stop.');
@@ -279,7 +422,21 @@ function startWatchMode(): void {
 // ============================================================================
 
 async function main(): Promise<void> {
+    const config = getConfig();
     const args = process.argv.slice(2);
+
+    console.log(`
+╔═══════════════════════════════════════════════════════════════╗
+║          📬 AUTONOME FOLLOW-UP SCHEDULER                      ║
+╚═══════════════════════════════════════════════════════════════╝
+`);
+
+    // Startup validation
+    if (!config.slackWebhookUrl) {
+        log('WARN', '⚠️  SLACK_WEBHOOK_URL not set - you will NOT receive failure notifications!');
+    } else {
+        log('SUCCESS', '✅ Slack notifications enabled');
+    }
 
     if (args.includes('--watch') || args.includes('-w')) {
         startWatchMode();
@@ -294,14 +451,32 @@ Options:
 Environment Variables:
   EMAIL_2_DELAY_DAYS   Days after Email 1 to send Email 2 (default: 3)
   EMAIL_3_DELAY_DAYS   Days after Email 1 to send Email 3 (default: 7)
+  SLACK_WEBHOOK_URL    Slack webhook for notifications (REQUIRED for alerts!)
 `);
     } else {
-        const result = await runFollowups();
-        process.exit(result.errors.length > 0 ? 1 : 0);
+        try {
+            const result = await runFollowups();
+            await sendSlackNotification(result, config);
+            process.exit(result.errors.length > 0 ? 1 : 0);
+        } catch (error) {
+            await sendCriticalFailureNotification(
+                error instanceof Error ? error : new Error(String(error)),
+                'Follow-up run',
+                config
+            );
+            process.exit(1);
+        }
     }
 }
 
-main().catch((error) => {
-    log('ERROR', 'Follow-up scheduler failed', { error });
+// Global error handler with notification
+main().catch(async (error) => {
+    const config = getConfig();
+    log('ERROR', 'Follow-up scheduler crashed', { error: error instanceof Error ? error.message : String(error) });
+    await sendCriticalFailureNotification(
+        error instanceof Error ? error : new Error(String(error)),
+        'Scheduler Startup',
+        config
+    );
     process.exit(1);
 });

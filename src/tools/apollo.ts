@@ -75,11 +75,31 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
       throw new Error(`Apify request failed: ${response.status} - ${errorText}`);
     }
 
-    const data: ApolloPerson[] = await response.json();
+    // Apify sometimes returns the error as the first item in the array if the actor fails but the request succeeds
+    // The type definition says ApolloPerson[] but it might be any[]
+    const data: any[] = await response.json();
 
-    // Debug log to check the structure of the first item
+    // Debug log FIRST so we can see what Apify returned before any checks
     if (data.length > 0) {
       console.log('📄 First item sample:', JSON.stringify(data[0], null, 2));
+    }
+
+    // Check for Apify platform errors (like plan limits)
+    // The error can come in different formats depending on the actor/error type
+    if (data.length > 0) {
+      const firstItem = data[0];
+      const errorMsg = firstItem.error || firstItem.errorMessage || firstItem.message;
+
+      // Check if this looks like an error response rather than a lead
+      const isErrorResponse = errorMsg && (
+        typeof errorMsg === 'string' ||
+        !firstItem.email // Real leads should have email field
+      );
+
+      if (isErrorResponse) {
+        const errorText = typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg);
+        throw new Error(`Apify Actor Error: ${errorText}\n   NOTE: This usually means you need to upgrade your Apify plan to use API access.`);
+      }
     }
 
     // Transform results
@@ -87,7 +107,10 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
     const primaryIndustry = params.industries[0] || 'unknown';
 
     for (const person of data) {
-      const lead = transformApolloPerson(person, primaryIndustry);
+      // Skip if it's not a person object (double check for error objects mixed in)
+      if (person.error) continue;
+
+      const lead = transformApolloPerson(person as ApolloPerson, primaryIndustry);
       if (lead) {
         leads.push(lead);
       }
@@ -118,9 +141,11 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
  */
 export function normalizeSearchParams(params: ApolloSearchParams): ApolloSearchParams {
   return {
-    locations: params.locations.map(l => l.toLowerCase().replace(/\s+/g, '+')),
-    industries: params.industries.map(i => i.toLowerCase().replace(/\s+/g, '+')),
-    jobTitles: params.jobTitles.map(t => t.toLowerCase().replace(/\s+/g, '+')),
+    // DO NOT normalize strings (no lowercasing or + replacements) 
+    // The Apify actor handles spaces correctly and + might break it or reduce relevance
+    locations: params.locations,
+    industries: params.industries,
+    jobTitles: params.jobTitles,
     maxResults: Math.min(params.maxResults ?? 100, 500), // Cap at 500
   };
 }
