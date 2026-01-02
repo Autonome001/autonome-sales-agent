@@ -355,9 +355,31 @@ async function runFollowups(): Promise<FollowUpResult> {
 `);
 
     const config = getConfig();
+    const result: FollowUpResult = { email2Sent: 0, email3Sent: 0, errors: [] };
+
+    // Validate required environment variables
+    if (!config.supabaseUrl || !config.supabaseKey) {
+        const msg = 'Missing SUPABASE_URL or SUPABASE_ANON_KEY environment variables';
+        log('ERROR', msg);
+        result.errors.push(msg);
+        return result;
+    }
+
     const supabase = createClient(config.supabaseUrl, config.supabaseKey);
 
-    const result: FollowUpResult = { email2Sent: 0, email3Sent: 0, errors: [] };
+    // Test database connection first
+    try {
+        const { error: testError } = await supabase.from('leads').select('count').limit(1);
+        if (testError) {
+            throw new Error(`Database connection test failed: ${testError.message || JSON.stringify(testError)}`);
+        }
+        log('SUCCESS', 'Database connected');
+    } catch (connError) {
+        const msg = `Database connection failed: ${connError instanceof Error ? connError.message : String(connError)}`;
+        log('ERROR', msg);
+        result.errors.push(msg);
+        return result;
+    }
 
     try {
         const email2Result = await processEmail2Followups(supabase, config);
