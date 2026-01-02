@@ -209,7 +209,9 @@ async function getLeadsForEmail2(supabase: SupabaseClient, delayDays: number): P
         .lt('email_1_sent_at', cutoffDate.toISOString())
         .not('email_2_body', 'is', null);
 
-    if (error) throw error;
+    if (error) {
+        throw new Error(`Supabase query failed (getLeadsForEmail2): ${error.message || JSON.stringify(error)}`);
+    }
     return data || [];
 }
 
@@ -224,7 +226,9 @@ async function getLeadsForEmail3(supabase: SupabaseClient, delayDays: number): P
         .lt('email_1_sent_at', cutoffDate.toISOString())
         .not('email_3_body', 'is', null);
 
-    if (error) throw error;
+    if (error) {
+        throw new Error(`Supabase query failed (getLeadsForEmail3): ${error.message || JSON.stringify(error)}`);
+    }
     return data || [];
 }
 
@@ -233,7 +237,9 @@ async function updateLead(supabase: SupabaseClient, id: string, updates: any): P
         .from('leads')
         .update({ ...updates, updated_at: new Date().toISOString() })
         .eq('id', id);
-    if (error) throw error;
+    if (error) {
+        throw new Error(`Supabase update failed (lead ${id}): ${error.message || JSON.stringify(error)}`);
+    }
 }
 
 // ============================================================================
@@ -262,11 +268,15 @@ async function sendEmail(config: FollowUpConfig, to: string, subject: string, bo
 
         const data = await response.json();
         if (!response.ok) {
-            return { success: false, error: data.message || 'Unknown error' };
+            // Ensure error is always a string
+            const errorMsg = typeof data.message === 'string'
+                ? data.message
+                : (data.message ? JSON.stringify(data.message) : JSON.stringify(data));
+            return { success: false, error: errorMsg };
         }
         return { success: true };
     } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
 }
 
@@ -358,7 +368,17 @@ async function runFollowups(): Promise<FollowUpResult> {
         result.email3Sent = email3Result.sent;
         result.errors.push(...email3Result.errors);
     } catch (error) {
-        result.errors.push(error instanceof Error ? error.message : String(error));
+        // Handle various error types properly
+        let errorMsg: string;
+        if (error instanceof Error) {
+            errorMsg = error.message;
+        } else if (typeof error === 'object' && error !== null) {
+            // Supabase errors come as objects with message/details
+            errorMsg = JSON.stringify(error);
+        } else {
+            errorMsg = String(error);
+        }
+        result.errors.push(errorMsg);
     }
 
     console.log(`
