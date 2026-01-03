@@ -32,6 +32,7 @@ interface Sender {
 
 import { ICP } from './config/icp.js';
 import { discoveryAgent } from './agents/discovery/index.js';
+import { buildEmployeeRanges } from './tools/apollo.js';
 
 async function runDiscoveryStage(limit: number): Promise<number> {
     console.log('\n┌─────────────────────────────────────────────────────────────┐');
@@ -43,7 +44,7 @@ async function runDiscoveryStage(limit: number): Promise<number> {
         jobTitles: ICP.jobTitles,
         locations: ICP.locations,
         seniorities: ICP.seniorities,
-        employeeRanges: [`${ICP.employeeRange.min},${ICP.employeeRange.max}`],
+        employeeRanges: buildEmployeeRanges(ICP.employeeRange.min, ICP.employeeRange.max),
         maxResults: Math.min(limit, ICP.maxResultsPerRun)
     });
 

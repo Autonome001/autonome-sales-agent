@@ -187,10 +187,8 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
       searchBody.person_locations = params.locations;
     }
 
-    // Add organization industries
+    // Add organization industries (use keyword search which accepts string names)
     if (params.industries && params.industries.length > 0) {
-      searchBody.organization_industry_tag_ids = params.industries;
-      // Also try with industry names as keywords
       searchBody.q_organization_keyword_tags = params.industries;
     }
 
