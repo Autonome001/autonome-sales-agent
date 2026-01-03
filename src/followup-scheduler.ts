@@ -347,13 +347,35 @@ async function processEmail3Followups(supabase: SupabaseClient, config: FollowUp
 // Main Follow-up Runner
 // ============================================================================
 
-async function runFollowups(): Promise<FollowUpResult> {
-    console.log(`
-╔═══════════════════════════════════════════════════════════════╗
-║          📬 AUTONOME FOLLOW-UP SCHEDULER                      ║
-╚═══════════════════════════════════════════════════════════════╝
-`);
+async function countPendingFollowups(supabase: SupabaseClient, config: FollowUpConfig): Promise<{ email2Count: number; email3Count: number }> {
+    const email2Cutoff = new Date();
+    email2Cutoff.setDate(email2Cutoff.getDate() - config.email2DelayDays);
 
+    const email3Cutoff = new Date();
+    email3Cutoff.setDate(email3Cutoff.getDate() - config.email3DelayDays);
+
+    const [email2Result, email3Result] = await Promise.all([
+        supabase
+            .from('leads')
+            .select('id', { count: 'exact', head: true })
+            .eq('status', 'email_1_sent')
+            .lt('email_1_sent_at', email2Cutoff.toISOString())
+            .not('email_2_body', 'is', null),
+        supabase
+            .from('leads')
+            .select('id', { count: 'exact', head: true })
+            .eq('status', 'email_2_sent')
+            .lt('email_1_sent_at', email3Cutoff.toISOString())
+            .not('email_3_body', 'is', null)
+    ]);
+
+    return {
+        email2Count: email2Result.count || 0,
+        email3Count: email3Result.count || 0
+    };
+}
+
+async function runFollowups(): Promise<FollowUpResult | null> {
     const config = getConfig();
     const result: FollowUpResult = { email2Sent: 0, email3Sent: 0, errors: [] };
 
@@ -373,13 +395,32 @@ async function runFollowups(): Promise<FollowUpResult> {
         if (testError) {
             throw new Error(`Database connection test failed: ${testError.message || JSON.stringify(testError)}`);
         }
-        log('SUCCESS', 'Database connected');
     } catch (connError) {
         const msg = `Database connection failed: ${connError instanceof Error ? connError.message : String(connError)}`;
         log('ERROR', msg);
         result.errors.push(msg);
         return result;
     }
+
+    // Early exit: Check if there are any pending follow-ups before processing
+    try {
+        const pending = await countPendingFollowups(supabase, config);
+
+        if (pending.email2Count === 0 && pending.email3Count === 0) {
+            log('INFO', 'No pending follow-ups - skipping run');
+            return null; // null signals "nothing to do" - no Slack notification needed
+        }
+
+        log('INFO', `Found ${pending.email2Count} Email 2 and ${pending.email3Count} Email 3 follow-ups pending`);
+    } catch (countError) {
+        log('WARN', `Could not count pending follow-ups, proceeding with full check: ${countError}`);
+    }
+
+    console.log(`
+╔═══════════════════════════════════════════════════════════════╗
+║          📬 AUTONOME FOLLOW-UP SCHEDULER                      ║
+╚═══════════════════════════════════════════════════════════════╝
+`);
 
     try {
         const email2Result = await processEmail2Followups(supabase, config);
@@ -433,7 +474,10 @@ function startWatchMode(): void {
 
     // Run immediately on start
     runFollowups().then(result => {
-        sendSlackNotification(result, config);
+        // Only send Slack notification if there was work to do (result !== null)
+        if (result) {
+            sendSlackNotification(result, config);
+        }
     }).catch(async error => {
         await sendCriticalFailureNotification(
             error instanceof Error ? error : new Error(String(error)),
@@ -446,7 +490,10 @@ function startWatchMode(): void {
     cron.schedule('0 * * * *', async () => {
         try {
             const result = await runFollowups();
-            await sendSlackNotification(result, config);
+            // Only send Slack notification if there was work to do (result !== null)
+            if (result) {
+                await sendSlackNotification(result, config);
+            }
         } catch (error) {
             await sendCriticalFailureNotification(
                 error instanceof Error ? error : new Error(String(error)),
@@ -498,8 +545,14 @@ Environment Variables:
     } else {
         try {
             const result = await runFollowups();
-            await sendSlackNotification(result, config);
-            process.exit(result.errors.length > 0 ? 1 : 0);
+            // Only send Slack notification if there was work to do (result !== null)
+            if (result) {
+                await sendSlackNotification(result, config);
+                process.exit(result.errors.length > 0 ? 1 : 0);
+            } else {
+                // Nothing to do - exit cleanly without notification
+                process.exit(0);
+            }
         } catch (error) {
             await sendCriticalFailureNotification(
                 error instanceof Error ? error : new Error(String(error)),
