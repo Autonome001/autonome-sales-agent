@@ -193,8 +193,26 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
     }
 
     // Add seniorities if provided
+    // Apollo expects: owner, founder, c_suite, partner, vp, head, director, manager, senior, entry, intern
     if (params.seniorities && params.seniorities.length > 0) {
-      searchBody.person_seniorities = params.seniorities.map(s => s.toLowerCase());
+      const seniorityMap: Record<string, string> = {
+        'owner': 'owner',
+        'founder': 'founder',
+        'c-suite': 'c_suite',
+        'c_suite': 'c_suite',
+        'csuite': 'c_suite',
+        'partner': 'partner',
+        'vp': 'vp',
+        'head': 'head',
+        'director': 'director',
+        'manager': 'manager',
+        'senior': 'senior',
+        'entry': 'entry',
+        'intern': 'intern',
+      };
+      searchBody.person_seniorities = params.seniorities
+        .map(s => seniorityMap[s.toLowerCase()] || s.toLowerCase())
+        .filter((v, i, a) => a.indexOf(v) === i); // dedupe
     }
 
     // Add employee ranges if provided
