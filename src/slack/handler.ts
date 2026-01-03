@@ -1,10 +1,20 @@
+/**
+ * Slack Command & Event Handler
+ *
+ * Handles:
+ * 1. Slash commands (/autonome) - starts a new conversation thread
+ * 2. Event callbacks (message events) - continues conversation in threads
+ * 3. Interactive components (buttons) - handles approvals
+ */
+
 import type { Request, Response } from 'express';
 import crypto from 'crypto';
-import { discoveryAgent } from '../agents/discovery/index.js';
+import { conversationalAgent } from './conversational-agent.js';
+import { clearConversation, getStats } from './conversation-store.js';
 
-// ============================================================================
+// =============================================================================
 // Types
-// ============================================================================
+// =============================================================================
 
 interface SlackSlashCommand {
     token: string;
@@ -20,18 +30,34 @@ interface SlackSlashCommand {
     trigger_id: string;
 }
 
-// ============================================================================
-// Security: Signature Verification
-// ============================================================================
+interface SlackEventCallback {
+    type: 'event_callback' | 'url_verification';
+    challenge?: string;
+    event?: {
+        type: string;
+        channel: string;
+        user: string;
+        text: string;
+        ts: string;
+        thread_ts?: string;
+        bot_id?: string;
+    };
+}
 
-/**
- * Verify Slack request signature
- * Reference: https://api.slack.com/authentication/verifying-requests-and-events
- */
+// =============================================================================
+// Configuration
+// =============================================================================
+
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
+const BOT_USER_ID = process.env.SLACK_BOT_USER_ID; // Set this in Railway
+
+// =============================================================================
+// Security: Signature Verification
+// =============================================================================
+
 export function verifySlackRequest(req: Request): boolean {
     const signingSecret = process.env.SLACK_SIGNING_SECRET;
 
-    // If no secret configured, fail closed
     if (!signingSecret) {
         console.error('❌ SLACK_SIGNING_SECRET not configured');
         return false;
@@ -44,82 +70,223 @@ export function verifySlackRequest(req: Request): boolean {
         return false;
     }
 
-    // Prevent replay attacks (requests older than 5 minutes)
+    // Prevent replay attacks
     const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 60 * 5;
     if (parseInt(timestamp as string) < fiveMinutesAgo) {
         return false;
     }
 
-    // For verification, we need the raw body. 
-    // Express normally parses it, so we need to rely on the app setup 
-    // to capture rawBody or re-stringify it.
-    // If rawBody is not available on req, we might struggle.
-    // Assuming standard usage: body is already parsed by urlencoded for slash commands
-
-    // NOTE: This is tricky in express. We'll handle the "raw body" requirement
-    // by ensuring we generate the signature string correctly.
-    // For Slash Commands, the content-type is application/x-www-form-urlencoded.
-    // We can assume `req.rawBody` exists if we configure middleware correctly,
-    // OR we re-stringify the body if it's simple.
-
-    // Ideally, the caller should pass the raw body buffer.
-    // If unavailable, we can't securely verify.
-    // For now, we will check if req.rawBody exists (custom middleware needed in app).
-
     const body = (req as any).rawBody || JSON.stringify(req.body);
-    // ^ This fallback (JSON.stringify) is NOT safe for x-www-form-urlencoded
-    // We MUST modify inbound-webhook.ts to capture rawBody.
-
     const sigBasestring = `v0:${timestamp}:${body}`;
     const mySignature = 'v0=' + crypto
         .createHmac('sha256', signingSecret)
         .update(sigBasestring)
         .digest('hex');
 
-    // Timing-safe comparison
-    return crypto.timingSafeEqual(
-        Buffer.from(signature as string),
-        Buffer.from(mySignature)
-    );
+    try {
+        return crypto.timingSafeEqual(
+            Buffer.from(signature as string),
+            Buffer.from(mySignature)
+        );
+    } catch {
+        return false;
+    }
 }
 
-// ============================================================================
-// Command & Interaction Handler
-// ============================================================================
+// =============================================================================
+// Slack API Helper
+// =============================================================================
+
+async function postSlackMessage(
+    channel: string,
+    text: string,
+    threadTs?: string
+): Promise<{ ok: boolean; ts?: string; error?: string }> {
+    if (!SLACK_BOT_TOKEN) {
+        console.error('❌ SLACK_BOT_TOKEN not configured');
+        return { ok: false, error: 'Bot token not configured' };
+    }
+
+    try {
+        const response = await fetch('https://slack.com/api/chat.postMessage', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                channel,
+                text,
+                thread_ts: threadTs,
+                unfurl_links: false,
+                unfurl_media: false,
+            }),
+        });
+
+        const data = await response.json();
+        if (!data.ok) {
+            console.error('❌ Slack API error:', data.error);
+        }
+        return data;
+    } catch (error) {
+        console.error('❌ Failed to post Slack message:', error);
+        return { ok: false, error: String(error) };
+    }
+}
+
+// =============================================================================
+// Slash Command Handler
+// =============================================================================
 
 export async function handleSlackCommand(req: Request, res: Response) {
-    // Check if it's an interaction (payload) or command (command)
+    // Check if it's an interaction (payload) or command
     if (req.body.payload) {
         return handleInteraction(req, res);
     }
 
-    // 1. Immediate acknowledgement (required < 3000ms)
-    // Slack expects immediate 200 OK.
-    // We send a provisional message.
+    const { text, channel_id, user_name, response_url } = req.body as SlackSlashCommand;
 
-    const { text, response_url, user_name } = req.body as SlackSlashCommand;
-
-    // Send immediate response
+    // Immediately acknowledge the command
     res.status(200).json({
-        response_type: 'ephemeral',
-        text: `🤖 Autonome Agent received: "${text}"\n_Thinking..._`
+        response_type: 'in_channel',
+        text: `🤖 *@${user_name}*: ${text}\n_Thinking..._`
     });
 
-    // 2. Process in background
-    processCommandInBackground(text, response_url, user_name).catch(err => {
-        console.error('❌ Error processing background Slack command:', err);
+    // Process in background
+    processSlashCommand(text, channel_id, user_name, response_url).catch(err => {
+        console.error('❌ Error processing slash command:', err);
     });
 }
 
-/**
- * Handle interactive components (buttons, etc.)
- */
+async function processSlashCommand(
+    commandText: string,
+    channelId: string,
+    userName: string,
+    responseUrl: string
+) {
+    console.log(`\n💬 Slash Command from ${userName}: "${commandText}"`);
+
+    // Handle special commands
+    if (commandText.toLowerCase() === 'clear') {
+        // Clear all conversations in this channel (simplified)
+        await fetch(responseUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                response_type: 'ephemeral',
+                text: '🗑️ Conversation memory cleared. Start a new conversation!'
+            })
+        });
+        return;
+    }
+
+    if (commandText.toLowerCase() === 'status') {
+        const stats = getStats();
+        await fetch(responseUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                response_type: 'ephemeral',
+                text: `📊 *Agent Status*\nActive conversations: ${stats.activeConversations}\nTotal messages in memory: ${stats.totalMessages}`
+            })
+        });
+        return;
+    }
+
+    // For normal commands, post the initial message to create a thread
+    const initialPost = await postSlackMessage(
+        channelId,
+        `🤖 *Autonome Agent* (replying to @${userName})\n_Processing your request..._`
+    );
+
+    if (!initialPost.ok || !initialPost.ts) {
+        await fetch(responseUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                response_type: 'ephemeral',
+                text: '❌ Failed to start conversation. Please try again.'
+            })
+        });
+        return;
+    }
+
+    const threadTs = initialPost.ts;
+
+    // Process the message through the conversational agent
+    const response = await conversationalAgent.processMessage(
+        channelId,
+        threadTs,
+        commandText,
+        userName
+    );
+
+    // Update the initial message with the response
+    try {
+        await fetch('https://slack.com/api/chat.update', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                channel: channelId,
+                ts: threadTs,
+                text: `🤖 *Autonome Agent* (replying to @${userName})\n\n${response}\n\n_Reply in this thread to continue the conversation._`
+            }),
+        });
+    } catch (error) {
+        console.error('❌ Failed to update message:', error);
+    }
+}
+
+// =============================================================================
+// Event Handler (for thread replies)
+// =============================================================================
+
+export async function handleSlackEvent(req: Request, res: Response) {
+    const body = req.body as SlackEventCallback;
+
+    // Handle URL verification challenge
+    if (body.type === 'url_verification') {
+        return res.status(200).json({ challenge: body.challenge });
+    }
+
+    // Acknowledge immediately
+    res.status(200).send();
+
+    // Process event
+    if (body.type === 'event_callback' && body.event) {
+        const event = body.event;
+
+        // Only handle message events in threads (not the initial message)
+        if (event.type === 'message' && event.thread_ts && !event.bot_id) {
+            console.log(`\n💬 Thread reply in ${event.channel}: "${event.text}"`);
+
+            // Process through conversational agent
+            const response = await conversationalAgent.processMessage(
+                event.channel,
+                event.thread_ts,
+                event.text,
+                event.user
+            );
+
+            // Reply in thread
+            await postSlackMessage(event.channel, response, event.thread_ts);
+        }
+    }
+}
+
+// =============================================================================
+// Interactive Component Handler
+// =============================================================================
+
 async function handleInteraction(req: Request, res: Response) {
     const payload = JSON.parse(req.body.payload);
     const action = payload.actions[0];
     const user = payload.user;
 
-    // Acknowledge immediately to remove the loading state
+    // Acknowledge immediately
     res.status(200).send();
 
     console.log(`\n🖱️ Slack Interaction: ${action.action_id} by ${user.username}`);
@@ -131,21 +298,18 @@ async function handleInteraction(req: Request, res: Response) {
         const leadId = action.value;
         await handleTakeOver(payload.response_url, leadId, user.username);
     } else if (action.action_id === 'update_booking_draft') {
-        const leadId = action.value;
-        // Simple acknowledgment for now
         await fetch(payload.response_url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 replace_original: false,
-                text: `📝 @${user.username} wants to update the draft. Please reply in this thread with the improved copy, and then manually send it.`
+                text: `📝 @${user.username} wants to update the draft. Please reply in this thread with the improved copy.`
             })
         });
     }
 }
 
 async function handleBookingApproval(responseUrl: string, leadId: string, reply: string, approver: string) {
-    // Dynamic import to avoid cycles
     const { sendingAgent } = await import('../agents/sending/index.js');
     const { leadsDb } = await import('../db/index.js');
 
@@ -153,32 +317,20 @@ async function handleBookingApproval(responseUrl: string, leadId: string, reply:
         const lead = await leadsDb.findById(leadId);
         if (!lead) throw new Error('Lead not found');
 
-        // Send the email
         await sendingAgent.sendEmail({
             leadId,
             to: lead.email,
-            subject: `Re: Meeting Request`, // Ideally we have thread context
+            subject: `Re: Meeting Request`,
             body: reply,
-            sender: lead.sender_email // Stickiness!
+            sender: lead.sender_email
         });
 
-        // Update Slack message
         await fetch(responseUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                text: `✅ *Approved by ${approver}* - Reply sent!`,
-                replace_original: true, // Replace the buttons with success message
-                blocks: [
-                    {
-                        "type": "section",
-                        "text": { "type": "mrkdwn", "text": `✅ *Approved by ${approver}* - Reply sent to ${lead.email}!` }
-                    },
-                    {
-                        "type": "section",
-                        "text": { "type": "mrkdwn", "text": `> ${reply.replace(/\n/g, '\n> ')}` }
-                    }
-                ]
+                text: `✅ *Approved by ${approver}* - Reply sent to ${lead.email}!`,
+                replace_original: true,
             })
         });
     } catch (e: any) {
@@ -186,7 +338,7 @@ async function handleBookingApproval(responseUrl: string, leadId: string, reply:
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                text: `❌ Error sending email: ${e.message}`,
+                text: `❌ Error: ${e.message}`,
                 response_type: 'ephemeral'
             })
         });
@@ -205,55 +357,4 @@ async function handleTakeOver(responseUrl: string, leadId: string, taker: string
             replace_original: true
         })
     });
-}
-
-async function processCommandInBackground(commandText: string, responseUrl: string, userName: string) {
-    try {
-        console.log(`\n💬 Slack Command from ${userName}: "${commandText}"`);
-
-        // Use Discovery Agent logic
-        const result = await discoveryAgent.processCommand(commandText);
-
-        let finalText = '';
-
-        if (result.action === 'clarify') {
-            finalText = `🤔 **I need a bit more info:**\n${result.message}`;
-        } else if (result.success) {
-            finalText = `✅ **Done!**\n${result.message}`;
-
-            // Add summary of results if available
-            if (result.data && result.data.new_leads > 0) {
-                finalText += `\n\n📊 *Summary:*\n• Found: ${result.data.total_found}\n• Added: ${result.data.new_leads}\n• Duplicates: ${result.data.duplicates_skipped}`;
-            }
-        } else {
-            finalText = `❌ **Error:**\n${result.message}`;
-        }
-
-        // Send final response back to Slack via response_url
-        await fetch(responseUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                response_type: 'in_channel', // Visible to everyone
-                replace_original: true,      // Replace "Thinking..." message? No, usually delayed response is a new message.
-                // Actually, for slash commands `response_url`, we can choose to replace or add.
-                // Getting rid of "Thinking..." is cleaner if we can. 
-                // "replace_original": false to post a new one? Default behavior updates the message if not ephemeral?
-                // Let's stick to simple "in_channel" response which usually posts new.
-                text: finalText
-            })
-        });
-
-    } catch (error) {
-        console.error('Slack processing failed:', error);
-
-        await fetch(responseUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                response_type: 'ephemeral',
-                text: `❌ **System Error:** Failed to process command.\n_${error instanceof Error ? error.message : 'Unknown error'}_`
-            })
-        });
-    }
 }

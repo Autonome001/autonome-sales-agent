@@ -28,7 +28,7 @@ const rawBodySaver = (req: any, res: any, buf: Buffer, encoding: string) => {
 app.use(express.json({ verify: rawBodySaver }));
 app.use(express.urlencoded({ extended: true, verify: rawBodySaver }));
 
-import { handleSlackCommand, verifySlackRequest } from './slack/handler.js';
+import { handleSlackCommand, handleSlackEvent, verifySlackRequest } from './slack/handler.js';
 
 // ============================================================================
 // Configuration
@@ -300,11 +300,8 @@ async function updateLeadWithReply(
 // Slack Command Endpoint
 // ============================================================================
 
-app.post('/slack/command', (req, res, next) => {
-    // 1. Verify Request Signature
-    // Skip verification in development if explicitly allowed, or if secret is missing but we want to debug
-    // But for production safety, we should enforce it.
-
+// Middleware to verify Slack requests
+const verifySlackMiddleware = (req: any, res: any, next: any) => {
     if (process.env.NODE_ENV === 'production' || process.env.SLACK_SIGNING_SECRET) {
         if (!verifySlackRequest(req)) {
             console.error('❌ Slack signature verification failed');
@@ -313,9 +310,14 @@ app.post('/slack/command', (req, res, next) => {
     } else {
         console.warn('⚠️  Running without Slack signature verification (Dev / No Secret)');
     }
-
     next();
-}, handleSlackCommand);
+};
+
+// Slash command endpoint
+app.post('/slack/command', verifySlackMiddleware, handleSlackCommand);
+
+// Events endpoint (for thread replies / continuous conversation)
+app.post('/slack/events', verifySlackMiddleware, handleSlackEvent);
 
 
 // ============================================================================
@@ -395,10 +397,13 @@ if (isMainModule) {
 
 Server running on port ${PORT}
 
-Webhook endpoint: http://localhost:${PORT}/webhook/inbound-email
-Health check:     http://localhost:${PORT}/health
+Endpoints:
+  Slack Command:    http://localhost:${PORT}/slack/command
+  Slack Events:     http://localhost:${PORT}/slack/events
+  Inbound Email:    http://localhost:${PORT}/webhook/inbound-email
+  Health Check:     http://localhost:${PORT}/health
 
-Waiting for inbound emails...
+Ready for Slack conversations and inbound emails...
 `);
     });
 }
