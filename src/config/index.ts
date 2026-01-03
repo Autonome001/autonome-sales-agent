@@ -17,9 +17,14 @@ const ConfigSchema = z.object({
     apiKey: z.string().min(1),
   }),
 
-  // Apify
+  // Apollo.io (Primary lead source)
+  apollo: z.object({
+    apiKey: z.string().min(1),
+  }),
+
+  // Apify (Legacy - kept for backward compatibility)
   apify: z.object({
-    apiToken: z.string().min(1),
+    apiToken: z.string().optional(),
   }),
 
   // Optional OpenAI
@@ -53,8 +58,11 @@ function loadConfig(): Config {
     anthropic: {
       apiKey: process.env.ANTHROPIC_API_KEY || '',
     },
+    apollo: {
+      apiKey: process.env.APOLLO_API_KEY || '',
+    },
     apify: {
-      apiToken: process.env.APIFY_API_TOKEN || '',
+      apiToken: process.env.APIFY_API_TOKEN,
     },
     openai: {
       apiKey: process.env.OPENAI_API_KEY,
@@ -85,4 +93,10 @@ function loadConfig(): Config {
 export const config = loadConfig();
 
 // Export individual configs for convenience
-export const { supabase: supabaseConfig, anthropic: anthropicConfig, apify: apifyConfig, slack: slackConfig } = config;
+export const {
+  supabase: supabaseConfig,
+  anthropic: anthropicConfig,
+  apollo: apolloConfig,
+  apify: apifyConfig,
+  slack: slackConfig
+} = config;

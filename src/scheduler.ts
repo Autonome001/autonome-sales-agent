@@ -35,13 +35,15 @@ import { discoveryAgent } from './agents/discovery/index.js';
 
 async function runDiscoveryStage(limit: number): Promise<number> {
     console.log('\n┌─────────────────────────────────────────────────────────────┐');
-    console.log('│ STAGE 0: DISCOVERY (Apify Scraping)                         │');
+    console.log('│ STAGE 0: DISCOVERY (Apollo.io)                              │');
     console.log('└─────────────────────────────────────────────────────────────┘');
 
     const result = await discoveryAgent.executeScrape({
         industries: ICP.industries,
         jobTitles: ICP.jobTitles,
         locations: ICP.locations,
+        seniorities: ICP.seniorities,
+        employeeRanges: [`${ICP.employeeRange.min},${ICP.employeeRange.max}`],
         maxResults: Math.min(limit, ICP.maxResultsPerRun)
     });
 
