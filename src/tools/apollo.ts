@@ -257,6 +257,17 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
     console.log(`📊 Apollo returned ${data.people?.length || 0} results`);
     console.log(`   Total available: ${data.pagination?.total_entries || 0}`);
 
+    // Log detailed params when 0 results for debugging
+    if (!data.people || data.people.length === 0) {
+      console.warn('⚠️ Apollo returned 0 results. Request params:', JSON.stringify({
+        person_titles: searchBody.person_titles,
+        person_locations: searchBody.person_locations,
+        person_seniorities: searchBody.person_seniorities,
+        organization_num_employees_ranges: searchBody.organization_num_employees_ranges,
+        q_organization_keyword_tags: searchBody.q_organization_keyword_tags,
+      }, null, 2));
+    }
+
     if (data.people && data.people.length > 0) {
       console.log('📄 First result sample:', JSON.stringify(data.people[0], null, 2));
     }

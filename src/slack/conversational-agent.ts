@@ -11,7 +11,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropicConfig } from '../config/index.js';
 import { leadsDb, eventsDb } from '../db/index.js';
-import { scrapeApollo, normalizeSearchParams, type ApolloSearchParams } from '../tools/apollo.js';
+import { scrapeApollo, normalizeSearchParams, buildEmployeeRanges, type ApolloSearchParams } from '../tools/apollo.js';
 import { ICP, ICP1_SMB_OPS, ICP2_AGENCIES, ICP3_SAAS, POSITIONING_ANGLES } from '../config/icp.js';
 import {
     getOrCreateConversation,
@@ -234,6 +234,10 @@ export class ConversationalAgent {
                 industries: params.industries || ICP.industries.slice(0, 5),
                 jobTitles: params.jobTitles || ICP.jobTitles.slice(0, 10),
                 seniorities: params.seniorities || ICP.seniorities,
+                employeeRanges: buildEmployeeRanges(
+                    params.employeeMin || ICP.employeeRange.min,
+                    params.employeeMax || ICP.employeeRange.max
+                ),
                 maxResults: params.maxResults || 25,
             };
 

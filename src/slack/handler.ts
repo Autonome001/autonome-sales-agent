@@ -153,8 +153,21 @@ export async function handleSlackCommand(req: Request, res: Response) {
     });
 
     // Process in background
-    processSlashCommand(text, channel_id, user_name, response_url).catch(err => {
+    processSlashCommand(text, channel_id, user_name, response_url).catch(async (err) => {
         console.error('❌ Error processing slash command:', err);
+        // Notify user of failure instead of leaving them hanging
+        try {
+            await fetch(response_url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    response_type: 'in_channel',
+                    text: `❌ Sorry, something went wrong: ${err instanceof Error ? err.message : 'Unknown error'}`
+                })
+            });
+        } catch (notifyErr) {
+            console.error('Failed to notify user of error:', notifyErr);
+        }
     });
 }
 
@@ -214,12 +227,18 @@ async function processSlashCommand(
     const threadTs = initialPost.ts;
 
     // Process the message through the conversational agent
-    const response = await conversationalAgent.processMessage(
-        channelId,
-        threadTs,
-        commandText,
-        userName
-    );
+    let response: string;
+    try {
+        response = await conversationalAgent.processMessage(
+            channelId,
+            threadTs,
+            commandText,
+            userName
+        );
+    } catch (error) {
+        console.error('❌ Agent error:', error);
+        response = `❌ Sorry, I encountered an error: ${error instanceof Error ? error.message : 'Unknown error'}`;
+    }
 
     // Update the initial message with the response
     try {
