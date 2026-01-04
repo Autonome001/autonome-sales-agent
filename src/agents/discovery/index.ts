@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropicConfig } from '../../config/index.js';
 import { leadsDb, eventsDb } from '../../db/index.js';
-import { scrapeApollo, normalizeSearchParams, type ApolloSearchParams } from '../../tools/apollo.js';
+import { scrapeApollo, normalizeSearchParams, type ApolloSearchParams } from '../../tools/apify.js';
 import type { DiscoveryQuery, DiscoveryResult, AgentResult, Lead } from '../../types/index.js';
 
 const SYSTEM_PROMPT = `You are a lead discovery agent for Autonome, responsible for finding and qualifying B2B leads.

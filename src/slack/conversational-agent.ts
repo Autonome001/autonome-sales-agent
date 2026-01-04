@@ -11,7 +11,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropicConfig } from '../config/index.js';
 import { leadsDb, eventsDb } from '../db/index.js';
-import { scrapeApollo, normalizeSearchParams, buildEmployeeRanges, type ApolloSearchParams } from '../tools/apollo.js';
+import { scrapeApollo, normalizeSearchParams, buildEmployeeRanges, type ApolloSearchParams } from '../tools/apify.js';
 import { ICP, ICP1_SMB_OPS, ICP2_AGENCIES, ICP3_SAAS, POSITIONING_ANGLES } from '../config/icp.js';
 import {
     getOrCreateConversation,

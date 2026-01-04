@@ -17,14 +17,14 @@ const ConfigSchema = z.object({
     apiKey: z.string().min(1),
   }),
 
-  // Apollo.io (Primary lead source)
+  // Apollo.io (Legacy - kept for backward compatibility)
   apollo: z.object({
-    apiKey: z.string().min(1),
+    apiKey: z.string().optional(),
   }),
 
-  // Apify (Legacy - kept for backward compatibility)
+  // Apify (Primary lead source via Leads Scraper actor)
   apify: z.object({
-    apiToken: z.string().optional(),
+    apiToken: z.string().min(1),
   }),
 
   // Optional OpenAI

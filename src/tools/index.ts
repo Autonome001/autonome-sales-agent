@@ -1,1 +1,1 @@
-export { scrapeApollo, normalizeSearchParams, type ApolloSearchParams, type ApolloScraperResult } from './apollo.js';
+export { scrapeApollo, normalizeSearchParams, buildEmployeeRanges, type ApolloSearchParams, type ApolloScraperResult } from './apify.js';
