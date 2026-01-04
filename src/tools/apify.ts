@@ -1,20 +1,28 @@
 /**
- * Apify Lead Scraper Integration
+ * Apify Apollo.io Lead Scraper Integration
  *
- * Uses the Apify "Leads Scraper (Like Apollo)" actor to search for leads.
- * Actor: pipelinelabs/lead-scraper-apollo-zoominfo-lusha
+ * Uses the FREE Apify actor "curious_coder/apollo-io-scraper" to scrape leads
+ * from Apollo.io search results. This actor is FREE and uses your Apollo.io
+ * account cookies to access the data.
  *
- * This replaces direct Apollo.io API calls with Apify's scraping service,
- * which works without requiring a paid Apollo API plan.
+ * Requirements:
+ * - APIFY_API_TOKEN: Your Apify API token
+ * - APOLLO_COOKIE: Your Apollo.io browser cookie (X-CSRF-Token or full cookie string)
  *
- * Apify API Documentation: https://docs.apify.com/api/v2
+ * How to get your Apollo cookie:
+ * 1. Log into Apollo.io in your browser
+ * 2. Open DevTools (F12) > Network tab
+ * 3. Refresh the page and look for any request to apollo.io
+ * 4. Copy the "Cookie" header value
+ *
+ * Apify Actor: https://apify.com/curious_coder/apollo-io-scraper
  */
 
 import { apifyConfig } from '../config/index.js';
 import type { CreateLead } from '../types/index.js';
 
 const APIFY_API_BASE = 'https://api.apify.com/v2';
-const LEADS_SCRAPER_ACTOR = 'pipelinelabs/lead-scraper-apollo-zoominfo-lusha';
+const APOLLO_SCRAPER_ACTOR = 'curious_coder/apollo-io-scraper';
 
 // =============================================================================
 // Types
@@ -36,17 +44,24 @@ export interface ApifyScraperResult {
   error?: string;
 }
 
-// Apify actor input schema for the Leads Scraper
-interface LeadsScraperInput {
-  totalResults: number;
-  emailStatus?: string[];
-  titles?: string[];
-  seniorities?: string[];
-  locations?: string[];
-  industries?: string[];
-  employeeCountRanges?: string[];
-  includeEmail?: boolean;
-  includePhone?: boolean;
+// Input schema for curious_coder/apollo-io-scraper
+interface ApolloScraperInput {
+  // Apollo search URL - built from parameters
+  searchUrl: string;
+  // Cookie from Apollo.io browser session
+  cookie: string;
+  // Number of results to scrape
+  count?: number;
+  // Starting page
+  startPage?: number;
+  // Whether to get emails (uses Apollo credits)
+  getEmails?: boolean;
+  // Include guessed emails
+  guessedEmails?: boolean;
+  // Min delay between requests (seconds)
+  minDelay?: number;
+  // Max delay between requests (seconds)
+  maxDelay?: number;
 }
 
 // Apify actor run response
@@ -60,55 +75,99 @@ interface ApifyRunResponse {
   };
 }
 
-// Lead data from the Apify actor output
-interface ApifyLeadResult {
-  firstName?: string;
-  lastName?: string;
+// Lead data from the Apollo scraper output
+interface ApolloLeadResult {
   name?: string;
+  first_name?: string;
+  last_name?: string;
   email?: string;
+  email_status?: string;
   phone?: string;
-  linkedInUrl?: string;
+  mobile_phone?: string;
+  linkedin_url?: string;
   title?: string;
   seniority?: string;
-  companyName?: string;
-  companyWebsite?: string;
-  companyIndustry?: string;
-  companySize?: string;
+  organization_name?: string;
+  organization?: {
+    name?: string;
+    website_url?: string;
+    industry?: string;
+    estimated_num_employees?: number;
+  };
   city?: string;
   state?: string;
   country?: string;
-  // Alternative field names the actor might use
-  first_name?: string;
-  last_name?: string;
-  linkedin_url?: string;
-  job_title?: string;
-  company_name?: string;
-  website_url?: string;
-  industry?: string;
+  // Alternative field names
+  firstName?: string;
+  lastName?: string;
+  linkedInUrl?: string;
+  companyName?: string;
+  companyWebsite?: string;
+  companyIndustry?: string;
+  jobTitle?: string;
 }
 
 // =============================================================================
-// Employee Range Mapping (Apollo format to Apify format)
+// Apollo Search URL Builder
 // =============================================================================
 
-const EMPLOYEE_RANGE_MAP: Record<string, string> = {
-  '1,10': '1-10',
-  '11,20': '11-20',
-  '21,50': '21-50',
-  '51,100': '51-100',
-  '101,200': '101-200',
-  '201,500': '201-500',
-  '501,1000': '501-1000',
-  '1001,2000': '1001-2000',
-  '2001,5000': '2001-5000',
-  '5001,10000': '5001-10000',
-  '10001,': '10001+',
-};
+/**
+ * Build an Apollo.io search URL from parameters
+ * Apollo uses URL query params for filtering
+ */
+function buildApolloSearchUrl(params: ApifySearchParams): string {
+  const baseUrl = 'https://app.apollo.io/#/people';
+  const queryParams: string[] = [];
 
-function convertEmployeeRanges(apolloRanges?: string[]): string[] {
-  if (!apolloRanges) return [];
-  return apolloRanges.map(r => EMPLOYEE_RANGE_MAP[r] || r).filter(Boolean);
+  // Job titles
+  if (params.jobTitles?.length > 0) {
+    params.jobTitles.forEach(title => {
+      queryParams.push(`personTitles[]=${encodeURIComponent(title)}`);
+    });
+  }
+
+  // Locations
+  if (params.locations?.length > 0) {
+    params.locations.forEach(loc => {
+      queryParams.push(`personLocations[]=${encodeURIComponent(loc)}`);
+    });
+  }
+
+  // Industries
+  if (params.industries?.length > 0) {
+    params.industries.forEach(industry => {
+      queryParams.push(`organizationIndustryTagIds[]=${encodeURIComponent(industry)}`);
+    });
+  }
+
+  // Seniorities
+  if (params.seniorities?.length > 0) {
+    const mappedSeniorities = mapSeniorities(params.seniorities);
+    mappedSeniorities.forEach(s => {
+      queryParams.push(`personSeniorities[]=${encodeURIComponent(s)}`);
+    });
+  }
+
+  // Employee ranges
+  if (params.employeeRanges?.length > 0) {
+    params.employeeRanges.forEach(range => {
+      queryParams.push(`organizationNumEmployeesRanges[]=${encodeURIComponent(range)}`);
+    });
+  }
+
+  // Only show contacts with email
+  queryParams.push('contactEmailStatusV2[]=verified');
+  queryParams.push('contactEmailStatusV2[]=guessed');
+  queryParams.push('contactEmailStatusV2[]=likely_to_engage');
+
+  return queryParams.length > 0
+    ? `${baseUrl}?${queryParams.join('&')}`
+    : baseUrl;
 }
+
+// =============================================================================
+// Employee Range Helpers
+// =============================================================================
 
 function getEmployeeRangeCodes(min: number, max: number): string[] {
   const ranges: string[] = [];
@@ -133,25 +192,25 @@ function getEmployeeRangeCodes(min: number, max: number): string[] {
 // =============================================================================
 
 const SENIORITY_MAP: Record<string, string> = {
-  'owner': 'Owner',
-  'founder': 'Founder',
-  'c-suite': 'C-Suite',
-  'c_suite': 'C-Suite',
-  'csuite': 'C-Suite',
-  'partner': 'Partner',
-  'vp': 'VP',
-  'head': 'Head',
-  'director': 'Director',
-  'manager': 'Manager',
-  'senior': 'Senior',
-  'entry': 'Entry',
-  'intern': 'Intern',
+  'owner': 'owner',
+  'founder': 'founder',
+  'c-suite': 'c_suite',
+  'c_suite': 'c_suite',
+  'csuite': 'c_suite',
+  'partner': 'partner',
+  'vp': 'vp',
+  'head': 'head',
+  'director': 'director',
+  'manager': 'manager',
+  'senior': 'senior',
+  'entry': 'entry',
+  'intern': 'intern',
 };
 
 function mapSeniorities(seniorities?: string[]): string[] {
   if (!seniorities) return [];
   return seniorities
-    .map(s => SENIORITY_MAP[s.toLowerCase()] || s)
+    .map(s => SENIORITY_MAP[s.toLowerCase()] || s.toLowerCase())
     .filter((v, i, a) => a.indexOf(v) === i);
 }
 
@@ -159,25 +218,40 @@ function mapSeniorities(seniorities?: string[]): string[] {
 // Transform Functions
 // =============================================================================
 
-function transformApifyLead(lead: ApifyLeadResult): CreateLead | null {
+function transformApolloLead(lead: ApolloLeadResult): CreateLead | null {
   const email = lead.email;
   if (!email) return null;
 
+  // Skip invalid or bounced emails
+  if (lead.email_status === 'invalid' || lead.email_status === 'bounced') {
+    return null;
+  }
+
+  // Parse name if needed
+  let firstName = lead.first_name || lead.firstName || null;
+  let lastName = lead.last_name || lead.lastName || null;
+
+  if (!firstName && !lastName && lead.name) {
+    const nameParts = lead.name.split(' ');
+    firstName = nameParts[0] || null;
+    lastName = nameParts.slice(1).join(' ') || null;
+  }
+
   return {
-    first_name: lead.firstName || lead.first_name || null,
-    last_name: lead.lastName || lead.last_name || null,
+    first_name: firstName,
+    last_name: lastName,
     email: email.toLowerCase(),
-    phone: lead.phone || null,
-    linkedin_url: lead.linkedInUrl || lead.linkedin_url || null,
-    company_name: lead.companyName || lead.company_name || null,
-    job_title: lead.title || lead.job_title || null,
+    phone: lead.phone || lead.mobile_phone || null,
+    linkedin_url: lead.linkedin_url || lead.linkedInUrl || null,
+    company_name: lead.organization_name || lead.organization?.name || lead.companyName || null,
+    job_title: lead.title || lead.jobTitle || null,
     seniority: lead.seniority || null,
-    industry: lead.companyIndustry || lead.industry || null,
-    website_url: lead.companyWebsite || lead.website_url || null,
+    industry: lead.organization?.industry || lead.companyIndustry || null,
+    website_url: lead.organization?.website_url || lead.companyWebsite || null,
     city: lead.city || null,
     state: lead.state || null,
     country: lead.country || null,
-    source: 'apify',
+    source: 'apify-apollo',
   };
 }
 
@@ -190,17 +264,18 @@ function transformApifyLead(lead: ApifyLeadResult): CreateLead | null {
  */
 async function runActorAndWait(
   actorId: string,
-  input: LeadsScraperInput,
+  input: ApolloScraperInput,
   apiToken: string,
-  timeoutMs: number = 120000 // 2 minutes default
+  timeoutMs: number = 180000 // 3 minutes default
 ): Promise<{ success: boolean; datasetId?: string; error?: string }> {
 
-  console.log('🚀 Starting Apify actor run...');
+  console.log('🚀 Starting Apify Apollo scraper...');
   console.log('   Actor:', actorId);
-  console.log('   Input:', JSON.stringify(input, null, 2));
+  console.log('   Search URL:', input.searchUrl.substring(0, 100) + '...');
+  console.log('   Count:', input.count);
 
   try {
-    // Start the actor run
+    // Start the actor run with waitForFinish
     const runResponse = await fetch(
       `${APIFY_API_BASE}/acts/${actorId}/runs?waitForFinish=${Math.floor(timeoutMs / 1000)}`,
       {
@@ -229,10 +304,9 @@ async function runActorAndWait(
       return { success: true, datasetId: runData.data.defaultDatasetId };
     }
 
-    // If not finished yet (shouldn't happen with waitForFinish), poll for status
+    // If still running, poll for completion
     if (runData.data.status === 'RUNNING') {
       console.log('⏳ Actor still running, polling for completion...');
-
       const pollResult = await pollRunStatus(runData.data.id, apiToken, timeoutMs);
       if (pollResult.success) {
         return { success: true, datasetId: runData.data.defaultDatasetId };
@@ -306,7 +380,7 @@ async function getDatasetItems(
   datasetId: string,
   apiToken: string,
   limit: number = 100
-): Promise<ApifyLeadResult[]> {
+): Promise<ApolloLeadResult[]> {
   try {
     const response = await fetch(
       `${APIFY_API_BASE}/datasets/${datasetId}/items?limit=${limit}`,
@@ -322,7 +396,7 @@ async function getDatasetItems(
       return [];
     }
 
-    const items: ApifyLeadResult[] = await response.json();
+    const items: ApolloLeadResult[] = await response.json();
     console.log(`📊 Retrieved ${items.length} items from dataset`);
     return items;
 
@@ -337,12 +411,14 @@ async function getDatasetItems(
 // =============================================================================
 
 /**
- * Search for leads using the Apify Leads Scraper actor
+ * Search for leads using the FREE Apify Apollo scraper
+ * Requires APIFY_API_TOKEN and APOLLO_COOKIE environment variables
  */
 export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScraperResult> {
-  console.log('🔍 Searching for leads via Apify...');
+  console.log('🔍 Searching for leads via Apify Apollo scraper...');
   console.log(`   Params: ${JSON.stringify(params, null, 2)}`);
 
+  // Check for required tokens
   if (!apifyConfig.apiToken) {
     console.error('❌ APIFY_API_TOKEN not configured');
     return {
@@ -353,42 +429,40 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
     };
   }
 
-  try {
-    // Build actor input
-    const actorInput: LeadsScraperInput = {
-      totalResults: params.maxResults || 25,
-      emailStatus: ['verified', 'guessed', 'likely'],
-      includeEmail: true,
-      includePhone: true,
+  const apolloCookie = process.env.APOLLO_COOKIE;
+  if (!apolloCookie) {
+    console.error('❌ APOLLO_COOKIE not configured');
+    return {
+      success: false,
+      totalFound: 0,
+      leads: [],
+      error: 'APOLLO_COOKIE environment variable not set. Please add your Apollo.io browser cookie.',
     };
+  }
 
-    // Add filters
-    if (params.jobTitles?.length > 0) {
-      actorInput.titles = params.jobTitles;
-    }
+  try {
+    // Build the Apollo search URL from parameters
+    const searchUrl = buildApolloSearchUrl(params);
+    console.log('   Built search URL:', searchUrl.substring(0, 150) + '...');
 
-    if (params.locations?.length > 0) {
-      actorInput.locations = params.locations;
-    }
-
-    if (params.industries?.length > 0) {
-      actorInput.industries = params.industries;
-    }
-
-    if (params.seniorities?.length > 0) {
-      actorInput.seniorities = mapSeniorities(params.seniorities);
-    }
-
-    if (params.employeeRanges?.length > 0) {
-      actorInput.employeeCountRanges = convertEmployeeRanges(params.employeeRanges);
-    }
+    // Build actor input
+    const actorInput: ApolloScraperInput = {
+      searchUrl,
+      cookie: apolloCookie,
+      count: params.maxResults || 25,
+      startPage: 1,
+      getEmails: true,
+      guessedEmails: true,
+      minDelay: 3,
+      maxDelay: 7,
+    };
 
     // Run the actor and wait for completion
     const runResult = await runActorAndWait(
-      LEADS_SCRAPER_ACTOR,
+      APOLLO_SCRAPER_ACTOR,
       actorInput,
       apifyConfig.apiToken,
-      180000 // 3 minute timeout for the actor run
+      300000 // 5 minute timeout (scraping takes time)
     );
 
     if (!runResult.success || !runResult.datasetId) {
@@ -410,7 +484,7 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
     // Transform to leads
     const leads: CreateLead[] = [];
     for (const item of items) {
-      const lead = transformApifyLead(item);
+      const lead = transformApolloLead(item);
       if (lead?.email) {
         leads.push(lead);
       }
@@ -462,7 +536,7 @@ export function normalizeSearchParams(params: ApifySearchParams): ApifySearchPar
     jobTitles: params.jobTitles || [],
     seniorities: params.seniorities || [],
     employeeRanges: params.employeeRanges || getEmployeeRangeCodes(20, 200),
-    maxResults: Math.min(params.maxResults ?? 50, 100),
+    maxResults: Math.min(params.maxResults ?? 25, 75), // Free tier limit is 75 per search
   };
 }
 
