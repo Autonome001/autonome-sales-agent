@@ -1,28 +1,28 @@
 /**
  * Apify Apollo.io Lead Scraper Integration
  *
- * Uses the FREE Apify actor "curious_coder/apollo-io-scraper" to scrape leads
- * from Apollo.io search results. This actor is FREE and uses your Apollo.io
- * account cookies to access the data.
+ * Uses the Apify actor "curious_coder/apollo-scraper" to scrape leads
+ * from Apollo.io search results. Uses your Apollo.io account cookies to access the data.
  *
  * Requirements:
  * - APIFY_API_TOKEN: Your Apify API token
- * - APOLLO_COOKIE: Your Apollo.io browser cookie (X-CSRF-Token or full cookie string)
+ * - APOLLO_COOKIE: Your Apollo.io browser cookies (JSON array from Cookie-Editor extension)
  *
- * How to get your Apollo cookie:
- * 1. Log into Apollo.io in your browser
- * 2. Open DevTools (F12) > Network tab
- * 3. Refresh the page and look for any request to apollo.io
- * 4. Copy the "Cookie" header value
+ * How to get your Apollo cookies:
+ * 1. Install the Cookie-Editor Chrome extension
+ * 2. Log into Apollo.io in your browser
+ * 3. Click on Cookie-Editor extension icon
+ * 4. Click "Export" to copy all cookies as JSON
+ * 5. Set APOLLO_COOKIE environment variable to the exported JSON
  *
- * Apify Actor: https://apify.com/curious_coder/apollo-io-scraper
+ * Apify Actor: https://apify.com/curious_coder/apollo-scraper
  */
 
 import { apifyConfig } from '../config/index.js';
 import type { CreateLead } from '../types/index.js';
 
 const APIFY_API_BASE = 'https://api.apify.com/v2';
-const APOLLO_SCRAPER_ACTOR = 'curious_coder/apollo-io-scraper';
+const APOLLO_SCRAPER_ACTOR = 'curious_coder/apollo-scraper';
 
 // =============================================================================
 // Types
@@ -44,12 +44,24 @@ export interface ApifyScraperResult {
   error?: string;
 }
 
-// Input schema for curious_coder/apollo-io-scraper
+// Cookie format from Cookie-Editor extension
+interface ApolloCookie {
+  name: string;
+  value: string;
+  domain?: string;
+  path?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+  sameSite?: string;
+  expirationDate?: number;
+}
+
+// Input schema for curious_coder/apollo-scraper
 interface ApolloScraperInput {
   // Apollo search URL - built from parameters
   searchUrl: string;
-  // Cookie from Apollo.io browser session
-  cookie: string;
+  // Cookies from Apollo.io browser session (array format from Cookie-Editor)
+  cookie: ApolloCookie[] | string;
   // Number of results to scrape
   count?: number;
   // Starting page
@@ -429,15 +441,33 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
     };
   }
 
-  const apolloCookie = process.env.APOLLO_COOKIE;
-  if (!apolloCookie) {
+  const apolloCookieRaw = process.env.APOLLO_COOKIE;
+  if (!apolloCookieRaw) {
     console.error('❌ APOLLO_COOKIE not configured');
     return {
       success: false,
       totalFound: 0,
       leads: [],
-      error: 'APOLLO_COOKIE environment variable not set. Please add your Apollo.io browser cookie.',
+      error: 'APOLLO_COOKIE environment variable not set. Please add your Apollo.io browser cookie (use Cookie-Editor extension to export as JSON array).',
     };
+  }
+
+  // Parse cookie - supports both JSON array (from Cookie-Editor) and plain string
+  let apolloCookie: ApolloCookie[] | string;
+  try {
+    // Try to parse as JSON array (Cookie-Editor export format)
+    const parsed = JSON.parse(apolloCookieRaw);
+    if (Array.isArray(parsed)) {
+      apolloCookie = parsed;
+      console.log(`   Parsed ${parsed.length} cookies from JSON array`);
+    } else {
+      apolloCookie = apolloCookieRaw;
+      console.log('   Using raw cookie string');
+    }
+  } catch {
+    // Not JSON, use as raw string
+    apolloCookie = apolloCookieRaw;
+    console.log('   Using raw cookie string');
   }
 
   try {
