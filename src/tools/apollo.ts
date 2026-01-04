@@ -255,15 +255,23 @@ async function searchPeoplePaid(params: ApolloSearchParams, apiKey: string): Pro
   console.log('📤 Apollo PAID Search request:', JSON.stringify(searchBody, null, 2));
 
   try {
+    // Add timeout using AbortController
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
     const response = await fetch(`${APOLLO_API_BASE}/v1/mixed_people/search`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'no-cache',
-        'X-Api-Key': apiKey,
+        'x-api-key': apiKey, // lowercase as per Apollo docs
       },
       body: JSON.stringify(searchBody),
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
+    console.log('   PAID Response status:', response.status);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -353,17 +361,26 @@ async function searchPeopleFree(params: ApolloSearchParams, apiKey: string): Pro
 
   const url = `${APOLLO_API_BASE}/api/v1/mixed_people/api_search?${queryParams.toString()}`;
   console.log('📤 Apollo FREE Search (api_search endpoint)');
+  console.log('   URL:', url.substring(0, 200) + '...');
 
   try {
+    // Add timeout using AbortController
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'no-cache',
-        'X-Api-Key': apiKey,
+        'x-api-key': apiKey, // lowercase as per Apollo docs
         'accept': 'application/json',
       },
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
+    console.log('   Response status:', response.status);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -396,6 +413,12 @@ async function searchPeopleFree(params: ApolloSearchParams, apiKey: string): Pro
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
+    // Check if it was a timeout
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.error('❌ Apollo FREE search timed out after 30 seconds');
+      return { success: false, people: [], totalFound: 0, error: 'Apollo API request timed out' };
+    }
+    console.error('❌ Apollo FREE search error:', message);
     return { success: false, people: [], totalFound: 0, error: message };
   }
 }
@@ -415,7 +438,7 @@ async function enrichPeopleById(personIds: string[], apiKey: string): Promise<Ap
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'no-cache',
-        'X-Api-Key': apiKey,
+        'x-api-key': apiKey, // lowercase as per Apollo docs
       },
       body: JSON.stringify({
         details: personIds.map(id => ({ id })),
@@ -598,7 +621,7 @@ export async function enrichContact(email: string): Promise<ApolloEnrichedPerson
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'no-cache',
-        'X-Api-Key': apolloConfig.apiKey,
+        'x-api-key': apolloConfig.apiKey, // lowercase as per Apollo docs
       },
       body: JSON.stringify({
         email: email,
