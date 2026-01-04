@@ -170,9 +170,8 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
   }
 
   try {
-    // Build the search request body
+    // Build the search request body (API key goes in header, not body)
     const searchBody: Record<string, any> = {
-      api_key: apolloConfig.apiKey,
       page: 1,
       per_page: Math.min(maxResults, 100), // Apollo max is 100 per page
     };
@@ -230,6 +229,7 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'no-cache',
+        'X-Api-Key': apolloConfig.apiKey,
       },
       body: JSON.stringify(searchBody),
     });
@@ -317,9 +317,9 @@ export async function enrichContact(email: string): Promise<ApolloPerson | null>
       headers: {
         'Content-Type': 'application/json',
         'Cache-Control': 'no-cache',
+        'X-Api-Key': apolloConfig.apiKey,
       },
       body: JSON.stringify({
-        api_key: apolloConfig.apiKey,
         email: email,
       }),
     });
