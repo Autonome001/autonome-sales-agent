@@ -4,13 +4,21 @@
  * Uses the Apollo.io API directly to search for leads based on ICP criteria.
  * Requires an APOLLO_API_KEY environment variable.
  *
- * Apollo API Documentation: https://apolloio.github.io/apollo-api-docs/
+ * IMPORTANT: Uses the FREE api_search endpoint which does not consume credits.
+ * The paid mixed_people/search endpoint is NOT accessible on free plans.
+ *
+ * Two-step process:
+ * 1. Search with /api/v1/mixed_people/api_search (FREE - returns person IDs)
+ * 2. Enrich with /v1/people/bulk_match for email/phone (uses credits)
+ *
+ * Apollo API Documentation: https://docs.apollo.io/
  */
 
 import { apolloConfig } from '../config/index.js';
 import type { CreateLead } from '../types/index.js';
 
-const APOLLO_API_BASE = 'https://api.apollo.io/v1';
+// Use the correct API base - note the /api prefix for the free endpoint
+const APOLLO_API_BASE = 'https://api.apollo.io';
 
 // =============================================================================
 // Types
@@ -32,7 +40,33 @@ export interface ApolloScraperResult {
   error?: string;
 }
 
-interface ApolloPerson {
+// Person from the FREE api_search endpoint (limited data)
+interface ApolloSearchPerson {
+  id: string;
+  first_name: string;
+  last_name: string;
+  name: string;
+  title: string;
+  seniority: string;
+  linkedin_url: string;
+  city: string;
+  state: string;
+  country: string;
+  headline: string;
+  // These flags indicate if data is available for enrichment
+  has_email: boolean;
+  has_phone: boolean;
+  organization?: {
+    id: string;
+    name: string;
+    website_url: string;
+    industry: string;
+    estimated_num_employees: number;
+  };
+}
+
+// Person from enrichment endpoint (full data)
+interface ApolloEnrichedPerson {
   id: string;
   first_name: string;
   last_name: string;
@@ -45,11 +79,11 @@ interface ApolloPerson {
   city: string;
   state: string;
   country: string;
-  organization: {
+  organization?: {
     id: string;
     name: string;
     website_url: string;
-    primary_phone: {
+    primary_phone?: {
       number: string;
       sanitized_number: string;
     };
@@ -59,13 +93,17 @@ interface ApolloPerson {
 }
 
 interface ApolloSearchResponse {
-  people: ApolloPerson[];
+  people: ApolloSearchPerson[];
   pagination: {
     page: number;
     per_page: number;
     total_entries: number;
     total_pages: number;
   };
+}
+
+interface ApolloBulkMatchResponse {
+  matches: ApolloEnrichedPerson[];
 }
 
 // =============================================================================
@@ -116,9 +154,9 @@ function getEmployeeRangeCodes(min: number, max: number): string[] {
 // =============================================================================
 
 /**
- * Transform Apollo API response to CreateLead format
+ * Transform enriched Apollo person to CreateLead format
  */
-function transformApolloPerson(person: ApolloPerson): CreateLead | null {
+function transformEnrichedPerson(person: ApolloEnrichedPerson): CreateLead | null {
   // Skip if no email or email is not verified
   if (!person.email) return null;
 
@@ -145,16 +183,199 @@ function transformApolloPerson(person: ApolloPerson): CreateLead | null {
   };
 }
 
+/**
+ * Transform search result person (without email) to CreateLead format
+ * Used as fallback when enrichment is not available
+ */
+function transformSearchPerson(person: ApolloSearchPerson): CreateLead | null {
+  // For search results without enrichment, we can only create partial leads
+  // This is useful for tracking but they won't have emails
+  return {
+    first_name: person.first_name || null,
+    last_name: person.last_name || null,
+    email: '', // Will be empty - need enrichment for email
+    phone: null,
+    linkedin_url: person.linkedin_url || null,
+    company_name: person.organization?.name ?? null,
+    job_title: person.title || null,
+    seniority: person.seniority || null,
+    industry: person.organization?.industry || null,
+    website_url: person.organization?.website_url || null,
+    city: person.city || null,
+    state: person.state || null,
+    country: person.country || null,
+    source: 'apollo',
+  };
+}
+
 // =============================================================================
 // Apollo API Functions
 // =============================================================================
 
 /**
- * Search for people using Apollo's People Search API
+ * Step 1: Search for people using the FREE api_search endpoint
+ * This endpoint does NOT consume credits but doesn't return emails
  */
-export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloScraperResult> {
+async function searchPeople(params: ApolloSearchParams, apiKey: string): Promise<{
+  success: boolean;
+  people: ApolloSearchPerson[];
+  totalFound: number;
+  error?: string;
+}> {
   const maxResults = params.maxResults ?? 50;
 
+  // Build query parameters for the free endpoint
+  // Note: The free endpoint uses query params, not body
+  const queryParams = new URLSearchParams();
+  queryParams.append('per_page', String(Math.min(maxResults, 100)));
+
+  // Add person titles
+  if (params.jobTitles && params.jobTitles.length > 0) {
+    params.jobTitles.forEach(title => {
+      queryParams.append('person_titles[]', title);
+    });
+  }
+
+  // Add person locations
+  if (params.locations && params.locations.length > 0) {
+    params.locations.forEach(loc => {
+      queryParams.append('person_locations[]', loc);
+    });
+  }
+
+  // Add seniorities
+  if (params.seniorities && params.seniorities.length > 0) {
+    const seniorityMap: Record<string, string> = {
+      'owner': 'owner',
+      'founder': 'founder',
+      'c-suite': 'c_suite',
+      'c_suite': 'c_suite',
+      'csuite': 'c_suite',
+      'partner': 'partner',
+      'vp': 'vp',
+      'head': 'head',
+      'director': 'director',
+      'manager': 'manager',
+      'senior': 'senior',
+      'entry': 'entry',
+      'intern': 'intern',
+    };
+    params.seniorities.forEach(s => {
+      const mapped = seniorityMap[s.toLowerCase()] || s.toLowerCase();
+      queryParams.append('person_seniorities[]', mapped);
+    });
+  }
+
+  // Add employee ranges
+  if (params.employeeRanges && params.employeeRanges.length > 0) {
+    params.employeeRanges.forEach(range => {
+      queryParams.append('organization_num_employees_ranges[]', range);
+    });
+  }
+
+  // Add industries as keywords
+  if (params.industries && params.industries.length > 0) {
+    params.industries.forEach(industry => {
+      queryParams.append('q_organization_keyword_tags[]', industry);
+    });
+  }
+
+  const url = `${APOLLO_API_BASE}/api/v1/mixed_people/api_search?${queryParams.toString()}`;
+  console.log('📤 Apollo FREE Search URL:', url.replace(apiKey, '[REDACTED]'));
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+        'X-Api-Key': apiKey,
+        'accept': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      let errorMessage = `Apollo search failed: ${response.status}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        if (errorJson.error) {
+          errorMessage = `Apollo API Error: ${errorJson.error}`;
+        }
+      } catch {
+        errorMessage += ` - ${errorText.slice(0, 200)}`;
+      }
+      return { success: false, people: [], totalFound: 0, error: errorMessage };
+    }
+
+    const data: ApolloSearchResponse = await response.json();
+
+    console.log(`📊 Apollo FREE search returned ${data.people?.length || 0} results`);
+    console.log(`   Total available: ${data.pagination?.total_entries || 0}`);
+
+    if (data.people && data.people.length > 0) {
+      const withEmail = data.people.filter(p => p.has_email).length;
+      console.log(`   People with email available: ${withEmail}`);
+    }
+
+    return {
+      success: true,
+      people: data.people || [],
+      totalFound: data.pagination?.total_entries || 0,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return { success: false, people: [], totalFound: 0, error: message };
+  }
+}
+
+/**
+ * Step 2: Enrich people by ID to get their email addresses
+ * This endpoint DOES consume credits
+ */
+async function enrichPeopleById(personIds: string[], apiKey: string): Promise<ApolloEnrichedPerson[]> {
+  if (personIds.length === 0) return [];
+
+  console.log(`🔍 Enriching ${personIds.length} people to get emails...`);
+
+  try {
+    // Use bulk match endpoint with person IDs
+    const response = await fetch(`${APOLLO_API_BASE}/v1/people/bulk_match`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+        'X-Api-Key': apiKey,
+      },
+      body: JSON.stringify({
+        details: personIds.map(id => ({ id })),
+        reveal_personal_emails: true,
+        reveal_phone_number: true,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ Bulk enrichment failed: ${response.status} - ${errorText.slice(0, 200)}`);
+      return [];
+    }
+
+    const data: ApolloBulkMatchResponse = await response.json();
+    console.log(`✅ Enriched ${data.matches?.length || 0} people with contact info`);
+
+    return data.matches || [];
+  } catch (error) {
+    console.error('❌ Bulk enrichment error:', error);
+    return [];
+  }
+}
+
+/**
+ * Main search function - uses two-step process:
+ * 1. FREE search to find people matching criteria
+ * 2. PAID enrichment to get email addresses (only for people with has_email=true)
+ */
+export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloScraperResult> {
   console.log('🔍 Searching Apollo.io for leads...');
   console.log(`   Params: ${JSON.stringify(params, null, 2)}`);
 
@@ -170,123 +391,58 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
   }
 
   try {
-    // Build the search request body (API key goes in header, not body)
-    const searchBody: Record<string, any> = {
-      page: 1,
-      per_page: Math.min(maxResults, 100), // Apollo max is 100 per page
-    };
+    // Step 1: Search using the FREE endpoint
+    const searchResult = await searchPeople(params, apolloConfig.apiKey);
 
-    // Add person titles (job titles)
-    if (params.jobTitles && params.jobTitles.length > 0) {
-      searchBody.person_titles = params.jobTitles;
-    }
-
-    // Add person locations
-    if (params.locations && params.locations.length > 0) {
-      searchBody.person_locations = params.locations;
-    }
-
-    // Add organization industries (use keyword search which accepts string names)
-    if (params.industries && params.industries.length > 0) {
-      searchBody.q_organization_keyword_tags = params.industries;
-    }
-
-    // Add seniorities if provided
-    // Apollo expects: owner, founder, c_suite, partner, vp, head, director, manager, senior, entry, intern
-    if (params.seniorities && params.seniorities.length > 0) {
-      const seniorityMap: Record<string, string> = {
-        'owner': 'owner',
-        'founder': 'founder',
-        'c-suite': 'c_suite',
-        'c_suite': 'c_suite',
-        'csuite': 'c_suite',
-        'partner': 'partner',
-        'vp': 'vp',
-        'head': 'head',
-        'director': 'director',
-        'manager': 'manager',
-        'senior': 'senior',
-        'entry': 'entry',
-        'intern': 'intern',
+    if (!searchResult.success) {
+      return {
+        success: false,
+        totalFound: 0,
+        leads: [],
+        error: searchResult.error,
       };
-      searchBody.person_seniorities = params.seniorities
-        .map(s => seniorityMap[s.toLowerCase()] || s.toLowerCase())
-        .filter((v, i, a) => a.indexOf(v) === i); // dedupe
     }
 
-    // Add employee ranges if provided
-    if (params.employeeRanges && params.employeeRanges.length > 0) {
-      searchBody.organization_num_employees_ranges = params.employeeRanges;
+    if (searchResult.people.length === 0) {
+      console.warn('⚠️ Apollo returned 0 results for search params:', JSON.stringify(params, null, 2));
+      return {
+        success: true,
+        totalFound: 0,
+        leads: [],
+      };
     }
 
-    // Only get contacts with emails
-    searchBody.contact_email_status = ['verified', 'guessed', 'likely'];
+    // Step 2: Filter for people who have emails and enrich them
+    const peopleWithEmail = searchResult.people.filter(p => p.has_email);
+    console.log(`📧 ${peopleWithEmail.length}/${searchResult.people.length} people have emails available`);
 
-    console.log('📤 Apollo API request:', JSON.stringify(searchBody, null, 2));
-
-    const response = await fetch(`${APOLLO_API_BASE}/mixed_people/search`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache',
-        'X-Api-Key': apolloConfig.apiKey,
-      },
-      body: JSON.stringify(searchBody),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      let errorMessage = `Apollo API request failed: ${response.status}`;
-
-      // Parse common Apollo errors
-      try {
-        const errorJson = JSON.parse(errorText);
-        if (errorJson.error) {
-          errorMessage = `Apollo API Error: ${errorJson.error}`;
-        }
-      } catch {
-        errorMessage += ` - ${errorText.slice(0, 200)}`;
-      }
-
-      throw new Error(errorMessage);
+    if (peopleWithEmail.length === 0) {
+      console.warn('⚠️ No people with emails found in search results');
+      return {
+        success: true,
+        totalFound: searchResult.totalFound,
+        leads: [],
+      };
     }
 
-    const data: ApolloSearchResponse = await response.json();
+    // Enrich to get actual email addresses
+    const personIds = peopleWithEmail.slice(0, params.maxResults || 50).map(p => p.id);
+    const enrichedPeople = await enrichPeopleById(personIds, apolloConfig.apiKey);
 
-    // Debug log
-    console.log(`📊 Apollo returned ${data.people?.length || 0} results`);
-    console.log(`   Total available: ${data.pagination?.total_entries || 0}`);
-
-    // Log detailed params when 0 results for debugging
-    if (!data.people || data.people.length === 0) {
-      console.warn('⚠️ Apollo returned 0 results. Request params:', JSON.stringify({
-        person_titles: searchBody.person_titles,
-        person_locations: searchBody.person_locations,
-        person_seniorities: searchBody.person_seniorities,
-        organization_num_employees_ranges: searchBody.organization_num_employees_ranges,
-        q_organization_keyword_tags: searchBody.q_organization_keyword_tags,
-      }, null, 2));
-    }
-
-    if (data.people && data.people.length > 0) {
-      console.log('📄 First result sample:', JSON.stringify(data.people[0], null, 2));
-    }
-
-    // Transform results
+    // Transform to leads
     const leads: CreateLead[] = [];
-
-    for (const person of data.people || []) {
-      const lead = transformApolloPerson(person);
-      if (lead) {
+    for (const person of enrichedPeople) {
+      const lead = transformEnrichedPerson(person);
+      if (lead && lead.email) {
         leads.push(lead);
       }
     }
 
-    console.log(`✅ Found ${data.pagination?.total_entries || 0} total, ${leads.length} with valid emails`);
+    console.log(`✅ Final result: ${leads.length} leads with valid emails`);
 
     return {
       success: true,
-      totalFound: data.pagination?.total_entries || leads.length,
+      totalFound: searchResult.totalFound,
       leads,
     };
   } catch (error) {
@@ -304,15 +460,16 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
 
 /**
  * Enrich a single contact by email using Apollo
+ * Note: This consumes credits
  */
-export async function enrichContact(email: string): Promise<ApolloPerson | null> {
+export async function enrichContact(email: string): Promise<ApolloEnrichedPerson | null> {
   if (!apolloConfig.apiKey) {
     console.error('❌ APOLLO_API_KEY not configured');
     return null;
   }
 
   try {
-    const response = await fetch(`${APOLLO_API_BASE}/people/match`, {
+    const response = await fetch(`${APOLLO_API_BASE}/v1/people/match`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -321,6 +478,8 @@ export async function enrichContact(email: string): Promise<ApolloPerson | null>
       },
       body: JSON.stringify({
         email: email,
+        reveal_personal_emails: true,
+        reveal_phone_number: true,
       }),
     });
 
