@@ -1,7 +1,7 @@
 /**
  * Apify Apollo.io Lead Scraper Integration
  *
- * Uses the Apify actor "curious_coder/apollo-scraper" to scrape leads
+ * Uses the Apify actor "onidivo/apollo-scraper" to scrape leads
  * from Apollo.io search results. Uses your Apollo.io account cookies to access the data.
  *
  * Requirements:
@@ -15,7 +15,8 @@
  * 4. Click "Export" to copy all cookies as JSON
  * 5. Set APOLLO_COOKIE environment variable to the exported JSON
  *
- * Apify Actor: https://apify.com/curious_coder/apollo-scraper
+ * Apify Actor: https://apify.com/onidivo/apollo-scraper
+ * Pricing: $35/month + usage (pay-per-result)
  */
 
 import { apifyConfig } from '../config/index.js';
@@ -24,7 +25,7 @@ import type { CreateLead } from '../types/index.js';
 const APIFY_API_BASE = 'https://api.apify.com/v2';
 // Actor ID format uses tilde (~) not slash (/) for API calls
 // See: https://docs.apify.com/academy/api/run-actor-and-retrieve-data-via-api
-const APOLLO_SCRAPER_ACTOR = 'curious_coder~apollo-scraper';
+const APOLLO_SCRAPER_ACTOR = 'onidivo~apollo-scraper';
 
 // =============================================================================
 // Types
@@ -58,24 +59,23 @@ interface ApolloCookie {
   expirationDate?: number;
 }
 
-// Input schema for curious_coder/apollo-scraper
+// Input schema for onidivo/apollo-scraper
+// See: https://apify.com/onidivo/apollo-scraper/input-schema
 interface ApolloScraperInput {
-  // Apollo search URL - built from parameters
-  searchUrl: string;
+  // Array of search URLs - each with a 'url' property
+  searchUrls: Array<{ url: string }>;
   // Cookies from Apollo.io browser session (array format from Cookie-Editor)
-  cookie: ApolloCookie[] | string;
-  // Number of results to scrape
-  count?: number;
-  // Starting page
+  cookies: ApolloCookie[];
+  // Starting page number (default: 1)
   startPage?: number;
-  // Whether to get emails (uses Apollo credits)
-  getEmails?: boolean;
-  // Include guessed emails
-  guessedEmails?: boolean;
-  // Min delay between requests (seconds)
-  minDelay?: number;
-  // Max delay between requests (seconds)
-  maxDelay?: number;
+  // Maximum pages to scrape (controls result count)
+  maxPages?: number;
+  // Proxy configuration
+  proxyConfiguration?: {
+    useApifyProxy?: boolean;
+  };
+  // Page navigation timeout in milliseconds
+  pageNavigationTimeoutMs?: number;
 }
 
 // Apify actor run response
@@ -454,22 +454,30 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
     };
   }
 
-  // Parse cookie - supports both JSON array (from Cookie-Editor) and plain string
-  let apolloCookie: ApolloCookie[] | string;
+  // Parse cookie - MUST be JSON array from Cookie-Editor extension
+  let apolloCookies: ApolloCookie[];
   try {
-    // Try to parse as JSON array (Cookie-Editor export format)
     const parsed = JSON.parse(apolloCookieRaw);
     if (Array.isArray(parsed)) {
-      apolloCookie = parsed;
+      apolloCookies = parsed;
       console.log(`   Parsed ${parsed.length} cookies from JSON array`);
     } else {
-      apolloCookie = apolloCookieRaw;
-      console.log('   Using raw cookie string');
+      console.error('❌ APOLLO_COOKIE must be a JSON array from Cookie-Editor extension');
+      return {
+        success: false,
+        totalFound: 0,
+        leads: [],
+        error: 'APOLLO_COOKIE must be a JSON array exported from Cookie-Editor extension. Please re-export your cookies.',
+      };
     }
   } catch {
-    // Not JSON, use as raw string
-    apolloCookie = apolloCookieRaw;
-    console.log('   Using raw cookie string');
+    console.error('❌ APOLLO_COOKIE is not valid JSON');
+    return {
+      success: false,
+      totalFound: 0,
+      leads: [],
+      error: 'APOLLO_COOKIE is not valid JSON. Please use Cookie-Editor extension to export cookies as JSON array.',
+    };
   }
 
   try {
@@ -477,16 +485,20 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
     const searchUrl = buildApolloSearchUrl(params);
     console.log('   Built search URL:', searchUrl.substring(0, 150) + '...');
 
-    // Build actor input
+    // Calculate max pages based on desired results (Apollo shows ~25 per page)
+    const maxResults = params.maxResults || 25;
+    const maxPages = Math.ceil(maxResults / 25);
+
+    // Build actor input for onidivo/apollo-scraper
     const actorInput: ApolloScraperInput = {
-      searchUrl,
-      cookie: apolloCookie,
-      count: params.maxResults || 25,
+      searchUrls: [{ url: searchUrl }],
+      cookies: apolloCookies,
       startPage: 1,
-      getEmails: true,
-      guessedEmails: true,
-      minDelay: 3,
-      maxDelay: 7,
+      maxPages: maxPages,
+      proxyConfiguration: {
+        useApifyProxy: true,
+      },
+      pageNavigationTimeoutMs: 60000,
     };
 
     // Run the actor and wait for completion
