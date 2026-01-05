@@ -38,9 +38,10 @@ const APIFY_API_BASE = 'https://api.apify.com/v2';
 //
 // ACTOR OPTIONS:
 // - 'code_crafter~leads-finder' - FREE but doesn't return emails reliably
-// - 'peakydev~leads-scraper-ppe' - $1/1k leads, 70-90% email rate (RECOMMENDED)
+// - 'peakydev~leads-scraper-ppe' - $1/1k leads, 70-90% email rate (HIT 100 LEAD/MONTH FREE LIMIT)
+// - 'pipelinelabs~lead-scraper-apollo-zoominfo-lusha-ppe' - $1/1k leads, alternative
 //
-const LEADS_FINDER_ACTOR = 'peakydev~leads-scraper-ppe';
+const LEADS_FINDER_ACTOR = 'pipelinelabs~lead-scraper-apollo-zoominfo-lusha-ppe';
 
 // =============================================================================
 // Types
