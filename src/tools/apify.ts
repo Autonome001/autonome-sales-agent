@@ -22,7 +22,9 @@ import { apifyConfig } from '../config/index.js';
 import type { CreateLead } from '../types/index.js';
 
 const APIFY_API_BASE = 'https://api.apify.com/v2';
-const APOLLO_SCRAPER_ACTOR = 'curious_coder/apollo-scraper';
+// Actor ID format uses tilde (~) not slash (/) for API calls
+// See: https://docs.apify.com/academy/api/run-actor-and-retrieve-data-via-api
+const APOLLO_SCRAPER_ACTOR = 'curious_coder~apollo-scraper';
 
 // =============================================================================
 // Types
