@@ -579,8 +579,8 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
       company_industry: mapIndustries(params.industries),
       // Company sizes
       size: mapEmployeeRanges(params.employeeRanges),
-      // Only get validated emails
-      email_status: ['validated'],
+      // Don't filter by email status - let all leads through and filter later if needed
+      // (the 'validated' filter was too restrictive, returning very few results)
       // Limit results (free tier caps at 100)
       limit: Math.min(params.maxResults || 25, 100),
     };
