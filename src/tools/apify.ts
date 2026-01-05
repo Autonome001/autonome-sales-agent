@@ -559,6 +559,12 @@ async function getDatasetItems(
 
     const items = await response.json() as LeadsFinderResult[];
     console.log(`📊 Retrieved ${items.length} items from dataset`);
+
+    // Debug: Log the first item's raw structure to see actual field names
+    if (items.length > 0) {
+      console.log('🔍 DEBUG - First item raw fields:', JSON.stringify(items[0], null, 2));
+    }
+
     return items;
 
   } catch (error) {
