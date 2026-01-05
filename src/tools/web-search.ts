@@ -1,11 +1,14 @@
 import { apifyConfig } from '../config/index.js';
 
 // Multiple actor options for Google Search - try in order
-// 1. naz_dev~google-search-light - Free, lightweight (try first)
-// 2. apify~google-search-scraper - Official but may require paid plan
+// All use pay-per-event pricing (~$0.002 per search)
+// 1. apidojo~google-search-scraper - Cheap ($0.002/search), reliable
+// 2. apify~google-search-scraper - Official Apify actor
+// 3. s-r~free-google-search-results-serp---only-0-25-per-1-000-results - Budget option
 const GOOGLE_SEARCH_ACTORS = [
-    'naz_dev~google-search-light',
+    'apidojo~google-search-scraper',
     'apify~google-search-scraper',
+    's-r~free-google-search-results-serp---only-0-25-per-1-000-results',
 ];
 const APIFY_BASE_URL = 'https://api.apify.com/v2';
 
@@ -36,17 +39,24 @@ export async function googleSearch(query: string, maxResults: number = 3): Promi
 }
 
 async function tryGoogleSearchActor(actorId: string, query: string, maxResults: number): Promise<SearchResult[]> {
-    // Build input based on actor type
+    // Build input based on actor type - each has different input schema
     let input: Record<string, any>;
 
-    if (actorId.includes('google-search-light')) {
-        // naz_dev~google-search-light uses different input format
+    if (actorId.includes('apidojo')) {
+        // apidojo~google-search-scraper format
+        input = {
+            queries: [query],
+            maxResultsPerPage: Math.min(maxResults, 10), // Max 10 per page after Google's 2024 change
+            maxPagesPerQuery: 1,
+        };
+    } else if (actorId.includes('s-r~free')) {
+        // s-r~free-google-search-results-serp format
         input = {
             query: query,
-            maxResults: maxResults,
+            numResults: maxResults,
         };
     } else {
-        // apify~google-search-scraper format
+        // apify~google-search-scraper format (official)
         input = {
             queries: [query],
             resultsPerPage: maxResults,
