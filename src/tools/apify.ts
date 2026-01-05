@@ -1,22 +1,19 @@
 /**
- * Apify Apollo.io Lead Scraper Integration
+ * Apify Leads Finder Integration
  *
- * Uses the Apify actor "onidivo/apollo-scraper" to scrape leads
- * from Apollo.io search results. Uses your Apollo.io account cookies to access the data.
+ * Uses the Apify actor "code_crafter/leads-finder" to generate B2B leads.
+ * This actor is FREE (100 leads/run on free Apify plan) and doesn't require Apollo cookies.
+ *
+ * Features:
+ * - Generates targeted B2B contact lists using advanced filters
+ * - Returns verified emails, LinkedIn URLs, and company data
+ * - Filters: job title, location, industry, company size, seniority
  *
  * Requirements:
- * - APIFY_API_TOKEN: Your Apify API token
- * - APOLLO_COOKIE: Your Apollo.io browser cookies (JSON array from Cookie-Editor extension)
+ * - APIFY_API_TOKEN: Your Apify API token (free tier available)
  *
- * How to get your Apollo cookies:
- * 1. Install the Cookie-Editor Chrome extension
- * 2. Log into Apollo.io in your browser
- * 3. Click on Cookie-Editor extension icon
- * 4. Click "Export" to copy all cookies as JSON
- * 5. Set APOLLO_COOKIE environment variable to the exported JSON
- *
- * Apify Actor: https://apify.com/onidivo/apollo-scraper
- * Pricing: $35/month + usage (pay-per-result)
+ * Apify Actor: https://apify.com/code_crafter/leads-finder
+ * Pricing: FREE (100 leads/run) or $1.5/1k leads on paid plans
  */
 
 import { apifyConfig } from '../config/index.js';
@@ -25,7 +22,7 @@ import type { CreateLead } from '../types/index.js';
 const APIFY_API_BASE = 'https://api.apify.com/v2';
 // Actor ID format uses tilde (~) not slash (/) for API calls
 // See: https://docs.apify.com/academy/api/run-actor-and-retrieve-data-via-api
-const APOLLO_SCRAPER_ACTOR = 'onidivo~apollo-scraper';
+const LEADS_FINDER_ACTOR = 'code_crafter~leads-finder';
 
 // =============================================================================
 // Types
@@ -47,35 +44,30 @@ export interface ApifyScraperResult {
   error?: string;
 }
 
-// Cookie format from Cookie-Editor extension
-interface ApolloCookie {
-  name: string;
-  value: string;
-  domain?: string;
-  path?: string;
-  secure?: boolean;
-  httpOnly?: boolean;
-  sameSite?: string;
-  expirationDate?: number;
-}
-
-// Input schema for onidivo/apollo-scraper
-// See: https://apify.com/onidivo/apollo-scraper/input-schema
-interface ApolloScraperInput {
-  // Array of search URLs - each with a 'url' property
-  searchUrls: Array<{ url: string }>;
-  // Cookies from Apollo.io browser session (array format from Cookie-Editor)
-  cookies: ApolloCookie[];
-  // Starting page number (default: 1)
-  startPage?: number;
-  // Maximum pages to scrape (controls result count)
-  maxPages?: number;
-  // Proxy configuration
-  proxyConfiguration?: {
-    useApifyProxy?: boolean;
-  };
-  // Page navigation timeout in milliseconds
-  pageNavigationTimeoutMs?: number;
+// Input schema for code_crafter/leads-finder
+// See: https://apify.com/code_crafter/leads-finder
+interface LeadsFinderInput {
+  // Job title filters
+  contact_job_title?: string[];
+  contact_not_job_title?: string[];
+  // Seniority levels: Founder, Owner, C-Level, Director, VP, Head, Manager, Senior, Entry, Trainee
+  seniority_level?: string[];
+  // Functional levels: C-Level, Finance, Product, Engineering, Design, HR, IT, Legal, Marketing, Operations, Sales, Support
+  functional_level?: string[];
+  // Location filters
+  contact_location?: string[];
+  contact_city?: string[];
+  contact_not_location?: string[];
+  contact_not_city?: string[];
+  // Company filters
+  company_industry?: string[];
+  company_not_industry?: string[];
+  // Company size: 0-1, 2-10, 11-20, 21-50, 51-100, 101-200, 201-500, 501-1000, 1001-2000, 2001-5000, 10000+
+  size?: string[];
+  // Email status: validated, not_validated, unknown
+  email_status?: string[];
+  // Limit results
+  limit?: number;
 }
 
 // Apify actor run response
@@ -89,98 +81,93 @@ interface ApifyRunResponse {
   };
 }
 
-// Lead data from the Apollo scraper output
-interface ApolloLeadResult {
-  name?: string;
+// Lead data from the Leads Finder output
+interface LeadsFinderResult {
+  // Contact info
   first_name?: string;
   last_name?: string;
+  full_name?: string;
   email?: string;
   email_status?: string;
+  personal_email?: string;
   phone?: string;
-  mobile_phone?: string;
-  linkedin_url?: string;
+  mobile_number?: string;
+  // Professional info
   title?: string;
+  job_title?: string;
   seniority?: string;
-  organization_name?: string;
-  organization?: {
-    name?: string;
-    website_url?: string;
-    industry?: string;
-    estimated_num_employees?: number;
-  };
+  linkedin_url?: string;
+  linkedin?: string;
+  // Company info
+  company_name?: string;
+  company?: string;
+  organization?: string;
+  company_website?: string;
+  company_domain?: string;
+  company_industry?: string;
+  industry?: string;
+  company_size?: string;
+  company_linkedin?: string;
+  // Location
   city?: string;
   state?: string;
   country?: string;
-  // Alternative field names
-  firstName?: string;
-  lastName?: string;
-  linkedInUrl?: string;
-  companyName?: string;
-  companyWebsite?: string;
-  companyIndustry?: string;
-  jobTitle?: string;
+  location?: string;
 }
 
 // =============================================================================
-// Apollo Search URL Builder
+// Seniority & Size Mapping
 // =============================================================================
 
-/**
- * Build an Apollo.io search URL from parameters
- * Apollo uses URL query params for filtering
- */
-function buildApolloSearchUrl(params: ApifySearchParams): string {
-  const baseUrl = 'https://app.apollo.io/#/people';
-  const queryParams: string[] = [];
+// Map our seniority values to Leads Finder format
+const SENIORITY_MAP: Record<string, string> = {
+  'owner': 'Owner',
+  'founder': 'Founder',
+  'c-suite': 'C-Level',
+  'c_suite': 'C-Level',
+  'csuite': 'C-Level',
+  'vp': 'VP',
+  'head': 'Head',
+  'director': 'Director',
+  'manager': 'Manager',
+  'senior': 'Senior',
+  'entry': 'Entry',
+  'intern': 'Trainee',
+};
 
-  // Job titles
-  if (params.jobTitles?.length > 0) {
-    params.jobTitles.forEach(title => {
-      queryParams.push(`personTitles[]=${encodeURIComponent(title)}`);
-    });
-  }
+function mapSeniorities(seniorities?: string[]): string[] {
+  if (!seniorities) return [];
+  return seniorities
+    .map(s => SENIORITY_MAP[s.toLowerCase()] || s)
+    .filter((v, i, a) => a.indexOf(v) === i);
+}
 
-  // Locations
-  if (params.locations?.length > 0) {
-    params.locations.forEach(loc => {
-      queryParams.push(`personLocations[]=${encodeURIComponent(loc)}`);
-    });
-  }
+// Map employee ranges to Leads Finder size format
+function mapEmployeeRanges(ranges?: string[]): string[] {
+  if (!ranges || ranges.length === 0) return [];
 
-  // Industries
-  if (params.industries?.length > 0) {
-    params.industries.forEach(industry => {
-      queryParams.push(`organizationIndustryTagIds[]=${encodeURIComponent(industry)}`);
-    });
-  }
+  const sizeMap: Record<string, string> = {
+    '1,10': '2-10',
+    '11,20': '11-20',
+    '21,50': '21-50',
+    '51,100': '51-100',
+    '101,200': '101-200',
+    '201,500': '201-500',
+    '501,1000': '501-1000',
+    '1001,2000': '1001-2000',
+    '2001,5000': '2001-5000',
+    '5001,10000': '2001-5000', // Closest match
+    '10001,': '10000+',
+  };
 
-  // Seniorities
-  if (params.seniorities?.length > 0) {
-    const mappedSeniorities = mapSeniorities(params.seniorities);
-    mappedSeniorities.forEach(s => {
-      queryParams.push(`personSeniorities[]=${encodeURIComponent(s)}`);
-    });
-  }
-
-  // Employee ranges
-  if (params.employeeRanges?.length > 0) {
-    params.employeeRanges.forEach(range => {
-      queryParams.push(`organizationNumEmployeesRanges[]=${encodeURIComponent(range)}`);
-    });
-  }
-
-  // Only show contacts with email
-  queryParams.push('contactEmailStatusV2[]=verified');
-  queryParams.push('contactEmailStatusV2[]=guessed');
-  queryParams.push('contactEmailStatusV2[]=likely_to_engage');
-
-  return queryParams.length > 0
-    ? `${baseUrl}?${queryParams.join('&')}`
-    : baseUrl;
+  return ranges
+    .map(r => sizeMap[r])
+    .filter(Boolean)
+    .filter((v, i, a) => a.indexOf(v) === i);
 }
 
 // =============================================================================
-// Employee Range Helpers
+// Employee Range Helpers (for backwards compatibility)
 // =============================================================================
 
 function getEmployeeRangeCodes(min: number, max: number): string[] {
@@ -202,70 +189,57 @@ function getEmployeeRangeCodes(min: number, max: number): string[] {
 }
 
 // =============================================================================
-// Seniority Mapping
-// =============================================================================
-
-const SENIORITY_MAP: Record<string, string> = {
-  'owner': 'owner',
-  'founder': 'founder',
-  'c-suite': 'c_suite',
-  'c_suite': 'c_suite',
-  'csuite': 'c_suite',
-  'partner': 'partner',
-  'vp': 'vp',
-  'head': 'head',
-  'director': 'director',
-  'manager': 'manager',
-  'senior': 'senior',
-  'entry': 'entry',
-  'intern': 'intern',
-};
-
-function mapSeniorities(seniorities?: string[]): string[] {
-  if (!seniorities) return [];
-  return seniorities
-    .map(s => SENIORITY_MAP[s.toLowerCase()] || s.toLowerCase())
-    .filter((v, i, a) => a.indexOf(v) === i);
-}
-
-// =============================================================================
 // Transform Functions
 // =============================================================================
 
-function transformApolloLead(lead: ApolloLeadResult): CreateLead | null {
-  const email = lead.email;
+function transformLeadsFinderResult(lead: LeadsFinderResult): CreateLead | null {
+  const email = lead.email || lead.personal_email;
   if (!email) return null;
 
-  // Skip invalid or bounced emails
+  // Skip invalid emails
   if (lead.email_status === 'invalid' || lead.email_status === 'bounced') {
     return null;
   }
 
-  // Parse name if needed
-  let firstName = lead.first_name || lead.firstName || null;
-  let lastName = lead.last_name || lead.lastName || null;
+  // Parse name
+  let firstName = lead.first_name || null;
+  let lastName = lead.last_name || null;
 
-  if (!firstName && !lastName && lead.name) {
-    const nameParts = lead.name.split(' ');
+  if (!firstName && !lastName && lead.full_name) {
+    const nameParts = lead.full_name.split(' ');
     firstName = nameParts[0] || null;
     lastName = nameParts.slice(1).join(' ') || null;
+  }
+
+  // Parse location
+  let city = lead.city || null;
+  let state = lead.state || null;
+  let country = lead.country || null;
+
+  if (!city && !state && lead.location) {
+    const locationParts = lead.location.split(',').map(s => s.trim());
+    if (locationParts.length >= 2) {
+      city = locationParts[0] || null;
+      state = locationParts[1] || null;
+      country = locationParts[2] || null;
+    }
   }
 
   return {
     first_name: firstName,
     last_name: lastName,
     email: email.toLowerCase(),
-    phone: lead.phone || lead.mobile_phone || null,
-    linkedin_url: lead.linkedin_url || lead.linkedInUrl || null,
-    company_name: lead.organization_name || lead.organization?.name || lead.companyName || null,
-    job_title: lead.title || lead.jobTitle || null,
+    phone: lead.phone || lead.mobile_number || null,
+    linkedin_url: lead.linkedin_url || lead.linkedin || null,
+    company_name: lead.company_name || lead.company || lead.organization || null,
+    job_title: lead.title || lead.job_title || null,
     seniority: lead.seniority || null,
-    industry: lead.organization?.industry || lead.companyIndustry || null,
-    website_url: lead.organization?.website_url || lead.companyWebsite || null,
-    city: lead.city || null,
-    state: lead.state || null,
-    country: lead.country || null,
-    source: 'apify-apollo',
+    industry: lead.company_industry || lead.industry || null,
+    website_url: lead.company_website || lead.company_domain || null,
+    city,
+    state,
+    country,
+    source: 'apify-leads-finder',
   };
 }
 
@@ -278,15 +252,17 @@ function transformApolloLead(lead: ApolloLeadResult): CreateLead | null {
  */
 async function runActorAndWait(
   actorId: string,
-  input: ApolloScraperInput,
+  input: LeadsFinderInput,
   apiToken: string,
   timeoutMs: number = 180000 // 3 minutes default
 ): Promise<{ success: boolean; datasetId?: string; error?: string }> {
 
-  console.log('🚀 Starting Apify Apollo scraper...');
+  console.log('🚀 Starting Apify Leads Finder...');
   console.log('   Actor:', actorId);
-  console.log('   Search URL:', input.searchUrl.substring(0, 100) + '...');
-  console.log('   Count:', input.count);
+  console.log('   Job Titles:', input.contact_job_title?.join(', ') || 'Any');
+  console.log('   Locations:', input.contact_location?.join(', ') || 'Any');
+  console.log('   Industries:', input.company_industry?.join(', ') || 'Any');
+  console.log('   Limit:', input.limit);
 
   try {
     // Start the actor run with waitForFinish
@@ -394,7 +370,7 @@ async function getDatasetItems(
   datasetId: string,
   apiToken: string,
   limit: number = 100
-): Promise<ApolloLeadResult[]> {
+): Promise<LeadsFinderResult[]> {
   try {
     const response = await fetch(
       `${APIFY_API_BASE}/datasets/${datasetId}/items?limit=${limit}`,
@@ -410,7 +386,7 @@ async function getDatasetItems(
       return [];
     }
 
-    const items: ApolloLeadResult[] = await response.json();
+    const items: LeadsFinderResult[] = await response.json();
     console.log(`📊 Retrieved ${items.length} items from dataset`);
     return items;
 
@@ -425,14 +401,16 @@ async function getDatasetItems(
 // =============================================================================
 
 /**
- * Search for leads using the FREE Apify Apollo scraper
- * Requires APIFY_API_TOKEN and APOLLO_COOKIE environment variables
+ * Search for leads using the FREE Apify Leads Finder
+ * Requires only APIFY_API_TOKEN (no Apollo cookies needed!)
+ *
+ * Free tier: 100 leads per run
  */
 export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScraperResult> {
-  console.log('🔍 Searching for leads via Apify Apollo scraper...');
+  console.log('🔍 Searching for leads via Apify Leads Finder...');
   console.log(`   Params: ${JSON.stringify(params, null, 2)}`);
 
-  // Check for required tokens
+  // Check for required token
   if (!apifyConfig.apiToken) {
     console.error('❌ APIFY_API_TOKEN not configured');
     return {
@@ -443,70 +421,33 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
     };
   }
 
-  const apolloCookieRaw = process.env.APOLLO_COOKIE;
-  if (!apolloCookieRaw) {
-    console.error('❌ APOLLO_COOKIE not configured');
-    return {
-      success: false,
-      totalFound: 0,
-      leads: [],
-      error: 'APOLLO_COOKIE environment variable not set. Please add your Apollo.io browser cookie (use Cookie-Editor extension to export as JSON array).',
-    };
-  }
-
-  // Parse cookie - MUST be JSON array from Cookie-Editor extension
-  let apolloCookies: ApolloCookie[];
   try {
-    const parsed = JSON.parse(apolloCookieRaw);
-    if (Array.isArray(parsed)) {
-      apolloCookies = parsed;
-      console.log(`   Parsed ${parsed.length} cookies from JSON array`);
-    } else {
-      console.error('❌ APOLLO_COOKIE must be a JSON array from Cookie-Editor extension');
-      return {
-        success: false,
-        totalFound: 0,
-        leads: [],
-        error: 'APOLLO_COOKIE must be a JSON array exported from Cookie-Editor extension. Please re-export your cookies.',
-      };
-    }
-  } catch {
-    console.error('❌ APOLLO_COOKIE is not valid JSON');
-    return {
-      success: false,
-      totalFound: 0,
-      leads: [],
-      error: 'APOLLO_COOKIE is not valid JSON. Please use Cookie-Editor extension to export cookies as JSON array.',
+    // Build actor input for code_crafter/leads-finder
+    const actorInput: LeadsFinderInput = {
+      // Job titles
+      contact_job_title: params.jobTitles?.length > 0 ? params.jobTitles : undefined,
+      // Seniority levels
+      seniority_level: mapSeniorities(params.seniorities),
+      // Locations (use as regions/countries)
+      contact_location: params.locations?.length > 0 ? params.locations : undefined,
+      // Industries
+      company_industry: params.industries?.length > 0 ? params.industries : undefined,
+      // Company sizes
+      size: mapEmployeeRanges(params.employeeRanges),
+      // Only get validated emails
+      email_status: ['validated'],
+      // Limit results (free tier caps at 100)
+      limit: Math.min(params.maxResults || 25, 100),
     };
-  }
 
-  try {
-    // Build the Apollo search URL from parameters
-    const searchUrl = buildApolloSearchUrl(params);
-    console.log('   Built search URL:', searchUrl.substring(0, 150) + '...');
-
-    // Calculate max pages based on desired results (Apollo shows ~25 per page)
-    const maxResults = params.maxResults || 25;
-    const maxPages = Math.ceil(maxResults / 25);
-
-    // Build actor input for onidivo/apollo-scraper
-    const actorInput: ApolloScraperInput = {
-      searchUrls: [{ url: searchUrl }],
-      cookies: apolloCookies,
-      startPage: 1,
-      maxPages: maxPages,
-      proxyConfiguration: {
-        useApifyProxy: true,
-      },
-      pageNavigationTimeoutMs: 60000,
-    };
+    console.log('   Actor input:', JSON.stringify(actorInput, null, 2));
 
     // Run the actor and wait for completion
     const runResult = await runActorAndWait(
-      APOLLO_SCRAPER_ACTOR,
+      LEADS_FINDER_ACTOR,
       actorInput,
       apifyConfig.apiToken,
-      300000 // 5 minute timeout (scraping takes time)
+      300000 // 5 minute timeout
     );
 
     if (!runResult.success || !runResult.datasetId) {
@@ -528,7 +469,7 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
     // Transform to leads
     const leads: CreateLead[] = [];
     for (const item of items) {
-      const lead = transformApolloLead(item);
+      const lead = transformLeadsFinderResult(item);
       if (lead?.email) {
         leads.push(lead);
       }
@@ -580,7 +521,7 @@ export function normalizeSearchParams(params: ApifySearchParams): ApifySearchPar
     jobTitles: params.jobTitles || [],
     seniorities: params.seniorities || [],
     employeeRanges: params.employeeRanges || getEmployeeRangeCodes(20, 200),
-    maxResults: Math.min(params.maxResults ?? 25, 75), // Free tier limit is 75 per search
+    maxResults: Math.min(params.maxResults ?? 25, 100), // Free tier limit is 100 per run
   };
 }
 
