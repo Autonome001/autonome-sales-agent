@@ -63,30 +63,40 @@ export interface ApifyScraperResult {
   error?: string;
 }
 
-// Input schema for leads scrapers (peakydev/leads-scraper-ppe uses similar schema)
-// See: https://apify.com/peakydev/leads-scraper-ppe
+// Input schema for pipelinelabs~lead-scraper-apollo-zoominfo-lusha-ppe
+// See: https://apify.com/pipelinelabs/lead-scraper-apollo-zoominfo-lusha-ppe
 interface LeadsFinderInput {
-  // Job title filters
-  contact_job_title?: string[];
-  contact_not_job_title?: string[];
-  // Seniority levels (lowercase): founder, owner, c_suite, director, vp, head, manager, senior, entry, trainee
-  seniority_level?: string[];
-  // Functional levels: C-Level, Finance, Product, Engineering, Design, HR, IT, Legal, Marketing, Operations, Sales, Support
-  functional_level?: string[];
-  // Location filters
-  contact_location?: string[];
-  contact_city?: string[];
-  contact_not_location?: string[];
-  contact_not_city?: string[];
+  // Total results limit
+  totalResults?: number;
+  // Email filters
+  hasEmail?: boolean;
+  emailStatus?: 'verified' | 'unverified';
+  // Job title filters - uses predefined enum values
+  personTitleIncludes?: string[];
+  personTitleExcludes?: string[];
+  personTitleExtraIncludes?: string[]; // Free text for custom titles
+  includeSimilarTitles?: boolean;
+  // Seniority/Management levels
+  seniorityIncludes?: string[];
+  seniorityExcludes?: string[];
+  // Department/Function
+  personFunctionIncludes?: string[];
+  personFunctionExcludes?: string[];
+  // Person location filters
+  personLocationCountryIncludes?: string[];
+  personLocationCountryExcludes?: string[];
+  personLocationStateIncludes?: string[];
+  personLocationStateExcludes?: string[];
+  personLocationCityIncludes?: string[];
+  // Company location filters
+  companyLocationCountryIncludes?: string[];
+  companyLocationStateIncludes?: string[];
+  companyLocationCityIncludes?: string[];
   // Company filters
-  company_industry?: string[];
-  company_not_industry?: string[];
-  // Company size: 0-1, 2-10, 11-20, 21-50, 51-100, 101-200, 201-500, 501-1000, 1001-2000, 2001-5000, 10000+
-  size?: string[];
-  // Email status: validated, not_validated, unknown
-  email_status?: string[];
-  // Limit results
-  limit?: number;
+  companyIndustryIncludes?: string[];
+  companyIndustryExcludes?: string[];
+  companyEmployeeSizeIncludes?: string[];
+  companyKeywordIncludes?: string[];
 }
 
 // Apify actor run response
@@ -152,35 +162,36 @@ interface LeadsFinderResult {
 }
 
 // =============================================================================
-// Seniority & Size Mapping
+// Seniority & Size Mapping for pipelinelabs actor
 // =============================================================================
 
-// Map our seniority values to Leads Finder API format
-// API expects lowercase values: founder, owner, c_suite, director, vp, head, manager, senior, entry, trainee
+// Map our seniority values to pipelinelabs API format (Title Case)
+// Valid values: Entry, Senior, Manager, Director, VP, C-Suite, Owner, Head, Founder, Partner, Intern
 const SENIORITY_MAP: Record<string, string> = {
-  'owner': 'owner',
-  'founder': 'founder',
-  'c-suite': 'c_suite',
-  'c_suite': 'c_suite',
-  'csuite': 'c_suite',
-  'c-level': 'c_suite',
-  'clevel': 'c_suite',
-  'ceo': 'c_suite',
-  'cfo': 'c_suite',
-  'cto': 'c_suite',
-  'coo': 'c_suite',
-  'cmo': 'c_suite',
-  'vp': 'vp',
-  'vice president': 'vp',
-  'vice-president': 'vp',
-  'head': 'head',
-  'director': 'director',
-  'manager': 'manager',
-  'senior': 'senior',
-  'entry': 'entry',
-  'junior': 'entry',
-  'intern': 'trainee',
-  'trainee': 'trainee',
+  'owner': 'Owner',
+  'founder': 'Founder',
+  'c-suite': 'C-Suite',
+  'c_suite': 'C-Suite',
+  'csuite': 'C-Suite',
+  'c-level': 'C-Suite',
+  'clevel': 'C-Suite',
+  'ceo': 'C-Suite',
+  'cfo': 'C-Suite',
+  'cto': 'C-Suite',
+  'coo': 'C-Suite',
+  'cmo': 'C-Suite',
+  'vp': 'VP',
+  'vice president': 'VP',
+  'vice-president': 'VP',
+  'head': 'Head',
+  'director': 'Director',
+  'manager': 'Manager',
+  'senior': 'Senior',
+  'entry': 'Entry',
+  'junior': 'Entry',
+  'intern': 'Intern',
+  'trainee': 'Intern',
+  'partner': 'Partner',
 };
 
 function mapSeniorities(seniorities?: string[]): string[] {
@@ -190,48 +201,85 @@ function mapSeniorities(seniorities?: string[]): string[] {
     .filter((v, i, a) => a.indexOf(v) === i);
 }
 
-// Map location values to Leads Finder API format (lowercase)
-// API expects lowercase values like "united states", "california, us", etc.
-function mapLocations(locations?: string[]): string[] {
-  if (!locations) return [];
-  return locations.map(loc => loc.toLowerCase());
+// Parse location string to extract country and state
+// Input: "North Carolina, United States" or "United States" or "California"
+function parseLocation(location: string): { country?: string; state?: string } {
+  const parts = location.split(',').map(p => p.trim());
+
+  // Check if it's a US state
+  const US_STATES = ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina', 'North Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania', 'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West Virginia', 'Wisconsin', 'Wyoming', 'District of Columbia'];
+
+  if (parts.length >= 2) {
+    // Format: "State, Country" or "City, State, Country"
+    const lastPart = parts[parts.length - 1];
+    const secondLastPart = parts[parts.length - 2];
+
+    // Check if last part is a country
+    if (lastPart.toLowerCase().includes('united states') || lastPart.toLowerCase() === 'usa' || lastPart.toLowerCase() === 'us') {
+      return { country: 'United States', state: secondLastPart };
+    }
+    return { country: lastPart, state: secondLastPart };
+  }
+
+  // Single part - check if it's a country or state
+  const single = parts[0];
+  if (US_STATES.some(s => s.toLowerCase() === single.toLowerCase())) {
+    return { country: 'United States', state: single };
+  }
+  return { country: single };
 }
 
-// Map industry values to Leads Finder API format (lowercase)
-// API expects specific lowercase values - map common variations to valid API values
+// Map industry values to pipelinelabs API format (Title Case with &)
+// Valid values include: Computer Software, Information Technology & Services, Management Consulting, etc.
 const INDUSTRY_MAP: Record<string, string> = {
-  // Direct mappings (already valid, just need lowercase)
-  'information technology & services': 'information technology & services',
-  'marketing & advertising': 'marketing & advertising',
-  'management consulting': 'management consulting',
-  'computer software': 'computer software',
-  'professional training & coaching': 'professional training & coaching',
+  // Direct mappings to valid API values
+  'information technology & services': 'Information Technology & Services',
+  'marketing & advertising': 'Marketing & Advertising',
+  'management consulting': 'Management Consulting',
+  'computer software': 'Computer Software',
+  'professional training & coaching': 'Professional Training & Coaching',
+  'financial services': 'Financial Services',
 
   // Common variations that need mapping
-  'software development': 'computer software',
-  'software': 'computer software',
-  'saas': 'computer software',
-  'technology': 'information technology & services',
-  'tech': 'information technology & services',
-  'it': 'information technology & services',
-  'it services': 'information technology & services',
-  'professional services': 'management consulting',
-  'consulting': 'management consulting',
-  'business services': 'management consulting',
-  'business consulting': 'management consulting',
-  'marketing': 'marketing & advertising',
-  'advertising': 'marketing & advertising',
-  'digital marketing': 'marketing & advertising',
-  'b2b': 'information technology & services',
-  'b2b services': 'management consulting',
-  'finance': 'financial services',
-  'fintech': 'financial services',
-  'healthcare': 'hospital & health care',
-  'health': 'health, wellness & fitness',
-  'ecommerce': 'internet',
-  'e-commerce': 'internet',
-  'startup': 'internet',
-  'startups': 'internet',
+  'software development': 'Computer Software',
+  'software': 'Computer Software',
+  'saas': 'Computer Software',
+  'technology': 'Information Technology & Services',
+  'tech': 'Information Technology & Services',
+  'it': 'Information Technology & Services',
+  'it services': 'Information Technology & Services',
+  'professional services': 'Management Consulting',
+  'consulting': 'Management Consulting',
+  'consultants': 'Management Consulting',
+  'business services': 'Management Consulting',
+  'business consulting': 'Management Consulting',
+  'marketing': 'Marketing & Advertising',
+  'advertising': 'Marketing & Advertising',
+  'digital marketing': 'Marketing & Advertising',
+  'b2b': 'Information Technology & Services',
+  'b2b services': 'Management Consulting',
+  'finance': 'Financial Services',
+  'fintech': 'Financial Services',
+  'healthcare': 'Hospital & Health Care',
+  'health': 'Health, Wellness & Fitness',
+  'ecommerce': 'Internet',
+  'e-commerce': 'Internet',
+  'startup': 'Internet',
+  'startups': 'Internet',
+  'internet': 'Internet',
+  'real estate': 'Real Estate',
+  'construction': 'Construction',
+  'retail': 'Retail',
+  'education': 'Education Management',
+  'staffing': 'Staffing & Recruiting',
+  'recruiting': 'Staffing & Recruiting',
+  'hr': 'Human Resources',
+  'human resources': 'Human Resources',
+  'accounting': 'Accounting',
+  'legal': 'Legal Services',
+  'law': 'Law Practice',
+  'insurance': 'Insurance',
+  'banking': 'Banking',
 };
 
 function mapIndustries(industries?: string[]): string[] {
@@ -240,8 +288,8 @@ function mapIndustries(industries?: string[]): string[] {
   const mapped = industries
     .map(ind => {
       const lower = ind.toLowerCase();
-      // Use mapped value if exists, otherwise use lowercase original
-      return INDUSTRY_MAP[lower] || lower;
+      // Use mapped value if exists, otherwise try to Title Case it
+      return INDUSTRY_MAP[lower] || ind;
     })
     // Remove duplicates
     .filter((v, i, a) => a.indexOf(v) === i)
@@ -251,84 +299,85 @@ function mapIndustries(industries?: string[]): string[] {
   return mapped;
 }
 
-// Valid industries from the API (partial list of most common)
+// Valid industries from the pipelinelabs API (Title Case)
 const VALID_INDUSTRIES = new Set([
-  'information technology & services',
-  'computer software',
-  'internet',
-  'marketing & advertising',
-  'management consulting',
-  'financial services',
-  'professional training & coaching',
-  'staffing & recruiting',
-  'human resources',
-  'retail',
-  'health, wellness & fitness',
-  'hospital & health care',
-  'real estate',
-  'construction',
-  'education management',
-  'e-learning',
-  'higher education',
-  'accounting',
-  'legal services',
-  'law practice',
-  'insurance',
-  'banking',
-  'investment management',
-  'telecommunications',
-  'media production',
-  'design',
-  'graphic design',
-  'architecture & planning',
-  'entertainment',
-  'hospitality',
-  'restaurants',
-  'food & beverages',
-  'automotive',
-  'logistics & supply chain',
-  'transportation/trucking/railroad',
-  'manufacturing',
-  'consumer goods',
-  'consumer services',
-  'events services',
-  'nonprofit organization management',
-  'research',
-  'biotechnology',
-  'pharmaceuticals',
-  'medical devices',
-  'environmental services',
-  'renewables & environment',
-  'oil & energy',
-  'mining & metals',
-  'chemicals',
-  'wholesale',
-  'import & export',
-  'computer & network security',
-  'computer hardware',
-  'computer networking',
-  'computer games',
-  'online media',
-  'broadcast media',
-  'publishing',
-  'writing & editing',
-  'public relations & communications',
-  'market research',
-  'venture capital & private equity',
-  'capital markets',
-  'investment banking',
+  'Information Technology & Services',
+  'Computer Software',
+  'Internet',
+  'Marketing & Advertising',
+  'Management Consulting',
+  'Financial Services',
+  'Professional Training & Coaching',
+  'Staffing & Recruiting',
+  'Human Resources',
+  'Retail',
+  'Health, Wellness & Fitness',
+  'Hospital & Health Care',
+  'Real Estate',
+  'Construction',
+  'Education Management',
+  'E-Learning',
+  'Higher Education',
+  'Accounting',
+  'Legal Services',
+  'Law Practice',
+  'Insurance',
+  'Banking',
+  'Investment Management',
+  'Telecommunications',
+  'Media Production',
+  'Design',
+  'Graphic Design',
+  'Architecture & Planning',
+  'Entertainment',
+  'Hospitality',
+  'Restaurants',
+  'Food & Beverages',
+  'Automotive',
+  'Logistics & Supply Chain',
+  'Transportation/Trucking/Railroad',
+  'Manufacturing',
+  'Consumer Goods',
+  'Consumer Services',
+  'Events Services',
+  'Nonprofit Organization Management',
+  'Research',
+  'Biotechnology',
+  'Pharmaceuticals',
+  'Medical Devices',
+  'Environmental Services',
+  'Renewables & Environment',
+  'Oil & Energy',
+  'Mining & Metals',
+  'Chemicals',
+  'Wholesale',
+  'Import & Export',
+  'Computer & Network Security',
+  'Computer Hardware',
+  'Computer Networking',
+  'Computer Games',
+  'Online Media',
+  'Broadcast Media',
+  'Publishing',
+  'Writing & Editing',
+  'Public Relations & Communications',
+  'Market Research',
+  'Venture Capital & Private Equity',
+  'Capital Markets',
+  'Investment Banking',
 ]);
 
 function isValidIndustry(industry: string): boolean {
   return VALID_INDUSTRIES.has(industry);
 }
 
-// Map employee ranges to Leads Finder size format
+// Map employee ranges to pipelinelabs size format
+// Valid values: 1-10, 11-20, 21-50, 51-100, 101-200, 201-500, 501-1000, 1001-2000, 2001-5000, 5001-10000, 10001+
 function mapEmployeeRanges(ranges?: string[]): string[] {
   if (!ranges || ranges.length === 0) return [];
 
   const sizeMap: Record<string, string> = {
-    '1,10': '2-10',
+    '1,10': '1-10',
     '11,20': '11-20',
     '21,50': '21-50',
     '51,100': '51-100',
@@ -337,8 +386,8 @@ function mapEmployeeRanges(ranges?: string[]): string[] {
     '501,1000': '501-1000',
     '1001,2000': '1001-2000',
     '2001,5000': '2001-5000',
-    '5001,10000': '2001-5000', // Closest match
-    '10001,': '10000+',
+    '5001,10000': '5001-10000',
+    '10001,': '10001+',
   };
 
   return ranges
@@ -619,22 +668,38 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
   }
 
   try {
-    // Build actor input for code_crafter/leads-finder
+    // Parse locations to extract countries and states
+    const countries: string[] = [];
+    const states: string[] = [];
+    if (params.locations?.length > 0) {
+      for (const loc of params.locations) {
+        const parsed = parseLocation(loc);
+        if (parsed.country && !countries.includes(parsed.country)) {
+          countries.push(parsed.country);
+        }
+        if (parsed.state && !states.includes(parsed.state)) {
+          states.push(parsed.state);
+        }
+      }
+    }
+
+    // Build actor input for pipelinelabs actor
     const actorInput: LeadsFinderInput = {
-      // Job titles
-      contact_job_title: params.jobTitles?.length > 0 ? params.jobTitles : undefined,
-      // Seniority levels (mapped to lowercase API values)
-      seniority_level: mapSeniorities(params.seniorities),
-      // Locations (mapped to lowercase API values)
-      contact_location: mapLocations(params.locations),
-      // Industries (mapped to lowercase API values)
-      company_industry: mapIndustries(params.industries),
-      // Company sizes
-      size: mapEmployeeRanges(params.employeeRanges),
-      // Don't filter by email status - let all leads through and filter later if needed
-      // (the 'validated' filter was too restrictive, returning very few results)
-      // Limit results (free tier caps at 100)
-      limit: Math.min(params.maxResults || 25, 100),
+      // Total results limit
+      totalResults: Math.min(params.maxResults || 25, 100),
+      // Require email addresses
+      hasEmail: true,
+      // Job titles - use free text field for custom titles
+      personTitleExtraIncludes: params.jobTitles?.length > 0 ? params.jobTitles : undefined,
+      includeSimilarTitles: true,
+      // Seniority levels (mapped to Title Case)
+      seniorityIncludes: mapSeniorities(params.seniorities),
+      // Person location filters
+      personLocationCountryIncludes: countries.length > 0 ? countries : undefined,
+      personLocationStateIncludes: states.length > 0 ? states : undefined,
+      // Company filters
+      companyIndustryIncludes: mapIndustries(params.industries),
+      companyEmployeeSizeIncludes: mapEmployeeRanges(params.employeeRanges),
     };
 
     console.log('   Actor input:', JSON.stringify(actorInput, null, 2));
