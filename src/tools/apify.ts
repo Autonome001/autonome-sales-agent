@@ -351,10 +351,18 @@ function getEmployeeRangeCodes(min: number, max: number): string[] {
 
 function transformLeadsFinderResult(lead: LeadsFinderResult): CreateLead | null {
   const email = lead.email || lead.personal_email;
-  if (!email) return null;
+
+  // Log what we received for debugging
+  console.log(`   Processing lead: ${lead.first_name} ${lead.last_name} - email: ${email || 'NONE'}, status: ${lead.email_status || 'unknown'}`);
+
+  if (!email) {
+    console.log(`   ⚠️ Skipping lead - no email address`);
+    return null;
+  }
 
   // Skip invalid emails
   if (lead.email_status === 'invalid' || lead.email_status === 'bounced') {
+    console.log(`   ⚠️ Skipping lead - email status: ${lead.email_status}`);
     return null;
   }
 
