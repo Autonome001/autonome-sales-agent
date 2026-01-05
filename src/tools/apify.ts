@@ -162,10 +162,129 @@ function mapLocations(locations?: string[]): string[] {
 }
 
 // Map industry values to Leads Finder API format (lowercase)
-// API expects lowercase values like "information technology & services", "marketing & advertising", etc.
+// API expects specific lowercase values - map common variations to valid API values
+const INDUSTRY_MAP: Record<string, string> = {
+  // Direct mappings (already valid, just need lowercase)
+  'information technology & services': 'information technology & services',
+  'marketing & advertising': 'marketing & advertising',
+  'management consulting': 'management consulting',
+  'computer software': 'computer software',
+  'professional training & coaching': 'professional training & coaching',
+
+  // Common variations that need mapping
+  'software development': 'computer software',
+  'software': 'computer software',
+  'saas': 'computer software',
+  'technology': 'information technology & services',
+  'tech': 'information technology & services',
+  'it': 'information technology & services',
+  'it services': 'information technology & services',
+  'professional services': 'management consulting',
+  'consulting': 'management consulting',
+  'business services': 'management consulting',
+  'business consulting': 'management consulting',
+  'marketing': 'marketing & advertising',
+  'advertising': 'marketing & advertising',
+  'digital marketing': 'marketing & advertising',
+  'b2b': 'information technology & services',
+  'b2b services': 'management consulting',
+  'finance': 'financial services',
+  'fintech': 'financial services',
+  'healthcare': 'hospital & health care',
+  'health': 'health, wellness & fitness',
+  'ecommerce': 'internet',
+  'e-commerce': 'internet',
+  'startup': 'internet',
+  'startups': 'internet',
+};
+
 function mapIndustries(industries?: string[]): string[] {
-  if (!industries) return [];
-  return industries.map(ind => ind.toLowerCase());
+  if (!industries || industries.length === 0) return [];
+
+  const mapped = industries
+    .map(ind => {
+      const lower = ind.toLowerCase();
+      // Use mapped value if exists, otherwise use lowercase original
+      return INDUSTRY_MAP[lower] || lower;
+    })
+    // Remove duplicates
+    .filter((v, i, a) => a.indexOf(v) === i)
+    // Filter out values that aren't in the valid list (to avoid API errors)
+    .filter(ind => isValidIndustry(ind));
+
+  return mapped;
+}
+
+// Valid industries from the API (partial list of most common)
+const VALID_INDUSTRIES = new Set([
+  'information technology & services',
+  'computer software',
+  'internet',
+  'marketing & advertising',
+  'management consulting',
+  'financial services',
+  'professional training & coaching',
+  'staffing & recruiting',
+  'human resources',
+  'retail',
+  'health, wellness & fitness',
+  'hospital & health care',
+  'real estate',
+  'construction',
+  'education management',
+  'e-learning',
+  'higher education',
+  'accounting',
+  'legal services',
+  'law practice',
+  'insurance',
+  'banking',
+  'investment management',
+  'telecommunications',
+  'media production',
+  'design',
+  'graphic design',
+  'architecture & planning',
+  'entertainment',
+  'hospitality',
+  'restaurants',
+  'food & beverages',
+  'automotive',
+  'logistics & supply chain',
+  'transportation/trucking/railroad',
+  'manufacturing',
+  'consumer goods',
+  'consumer services',
+  'events services',
+  'nonprofit organization management',
+  'research',
+  'biotechnology',
+  'pharmaceuticals',
+  'medical devices',
+  'environmental services',
+  'renewables & environment',
+  'oil & energy',
+  'mining & metals',
+  'chemicals',
+  'wholesale',
+  'import & export',
+  'computer & network security',
+  'computer hardware',
+  'computer networking',
+  'computer games',
+  'online media',
+  'broadcast media',
+  'publishing',
+  'writing & editing',
+  'public relations & communications',
+  'market research',
+  'venture capital & private equity',
+  'capital markets',
+  'investment banking',
+]);
+
+function isValidIndustry(industry: string): boolean {
+  return VALID_INDUSTRIES.has(industry);
 }
 
 // Map employee ranges to Leads Finder size format
