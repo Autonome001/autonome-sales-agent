@@ -1,6 +1,7 @@
 import { apifyConfig } from '../config/index.js';
 
-const GOOGLE_SEARCH_ACTOR = 'apify/google-search-scraper';
+// Actor ID uses tilde format for API calls
+const GOOGLE_SEARCH_ACTOR = 'apify~google-search-scraper';
 const APIFY_BASE_URL = 'https://api.apify.com/v2';
 
 export interface SearchResult {
