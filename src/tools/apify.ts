@@ -161,6 +161,13 @@ function mapLocations(locations?: string[]): string[] {
   return locations.map(loc => loc.toLowerCase());
 }
 
+// Map industry values to Leads Finder API format (lowercase)
+// API expects lowercase values like "information technology & services", "marketing & advertising", etc.
+function mapIndustries(industries?: string[]): string[] {
+  if (!industries) return [];
+  return industries.map(ind => ind.toLowerCase());
+}
+
 // Map employee ranges to Leads Finder size format
 function mapEmployeeRanges(ranges?: string[]): string[] {
   if (!ranges || ranges.length === 0) return [];
@@ -449,8 +456,8 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
       seniority_level: mapSeniorities(params.seniorities),
       // Locations (mapped to lowercase API values)
       contact_location: mapLocations(params.locations),
-      // Industries
-      company_industry: params.industries?.length > 0 ? params.industries : undefined,
+      // Industries (mapped to lowercase API values)
+      company_industry: mapIndustries(params.industries),
       // Company sizes
       size: mapEmployeeRanges(params.employeeRanges),
       // Only get validated emails
