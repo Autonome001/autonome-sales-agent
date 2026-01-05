@@ -154,6 +154,13 @@ function mapSeniorities(seniorities?: string[]): string[] {
     .filter((v, i, a) => a.indexOf(v) === i);
 }
 
+// Map location values to Leads Finder API format (lowercase)
+// API expects lowercase values like "united states", "california, us", etc.
+function mapLocations(locations?: string[]): string[] {
+  if (!locations) return [];
+  return locations.map(loc => loc.toLowerCase());
+}
+
 // Map employee ranges to Leads Finder size format
 function mapEmployeeRanges(ranges?: string[]): string[] {
   if (!ranges || ranges.length === 0) return [];
@@ -438,10 +445,10 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
     const actorInput: LeadsFinderInput = {
       // Job titles
       contact_job_title: params.jobTitles?.length > 0 ? params.jobTitles : undefined,
-      // Seniority levels
+      // Seniority levels (mapped to lowercase API values)
       seniority_level: mapSeniorities(params.seniorities),
-      // Locations (use as regions/countries)
-      contact_location: params.locations?.length > 0 ? params.locations : undefined,
+      // Locations (mapped to lowercase API values)
+      contact_location: mapLocations(params.locations),
       // Industries
       company_industry: params.industries?.length > 0 ? params.industries : undefined,
       // Company sizes
