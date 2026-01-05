@@ -50,7 +50,7 @@ interface LeadsFinderInput {
   // Job title filters
   contact_job_title?: string[];
   contact_not_job_title?: string[];
-  // Seniority levels: Founder, Owner, C-Level, Director, VP, Head, Manager, Senior, Entry, Trainee
+  // Seniority levels (lowercase): founder, owner, c_suite, director, vp, head, manager, senior, entry, trainee
   seniority_level?: string[];
   // Functional levels: C-Level, Finance, Product, Engineering, Design, HR, IT, Legal, Marketing, Operations, Sales, Support
   functional_level?: string[];
@@ -119,20 +119,32 @@ interface LeadsFinderResult {
 // Seniority & Size Mapping
 // =============================================================================
 
-// Map our seniority values to Leads Finder format
+// Map our seniority values to Leads Finder API format
+// API expects lowercase values: founder, owner, c_suite, director, vp, head, manager, senior, entry, trainee
 const SENIORITY_MAP: Record<string, string> = {
-  'owner': 'Owner',
-  'founder': 'Founder',
-  'c-suite': 'C-Level',
-  'c_suite': 'C-Level',
-  'csuite': 'C-Level',
-  'vp': 'VP',
-  'head': 'Head',
-  'director': 'Director',
-  'manager': 'Manager',
-  'senior': 'Senior',
-  'entry': 'Entry',
-  'intern': 'Trainee',
+  'owner': 'owner',
+  'founder': 'founder',
+  'c-suite': 'c_suite',
+  'c_suite': 'c_suite',
+  'csuite': 'c_suite',
+  'c-level': 'c_suite',
+  'clevel': 'c_suite',
+  'ceo': 'c_suite',
+  'cfo': 'c_suite',
+  'cto': 'c_suite',
+  'coo': 'c_suite',
+  'cmo': 'c_suite',
+  'vp': 'vp',
+  'vice president': 'vp',
+  'vice-president': 'vp',
+  'head': 'head',
+  'director': 'director',
+  'manager': 'manager',
+  'senior': 'senior',
+  'entry': 'entry',
+  'junior': 'entry',
+  'intern': 'trainee',
+  'trainee': 'trainee',
 };
 
 function mapSeniorities(seniorities?: string[]): string[] {
@@ -284,7 +296,7 @@ async function runActorAndWait(
       return { success: false, error: `Apify API error: ${runResponse.status} - ${errorText.slice(0, 200)}` };
     }
 
-    const runData: ApifyRunResponse = await runResponse.json();
+    const runData = await runResponse.json() as ApifyRunResponse;
     console.log('   Run ID:', runData.data.id);
     console.log('   Status:', runData.data.status);
     console.log('   Dataset ID:', runData.data.defaultDatasetId);
@@ -340,7 +352,7 @@ async function pollRunStatus(
         return { success: false, error: `Failed to get run status: ${response.status}` };
       }
 
-      const data = await response.json();
+      const data = await response.json() as ApifyRunResponse;
       console.log(`   Poll: Status = ${data.data.status}`);
 
       if (data.data.status === 'SUCCEEDED') {
@@ -386,7 +398,7 @@ async function getDatasetItems(
       return [];
     }
 
-    const items: LeadsFinderResult[] = await response.json();
+    const items = await response.json() as LeadsFinderResult[];
     console.log(`📊 Retrieved ${items.length} items from dataset`);
     return items;
 
