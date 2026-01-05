@@ -36,7 +36,7 @@ import { buildEmployeeRanges } from './tools/apify.js';
 
 async function runDiscoveryStage(limit: number): Promise<number> {
     console.log('\n┌─────────────────────────────────────────────────────────────┐');
-    console.log('│ STAGE 0: DISCOVERY (Apify Leads Scraper)                     │');
+    console.log('│ STAGE 0: DISCOVERY (Apify Leads Scraper)                    │');
     console.log('└─────────────────────────────────────────────────────────────┘');
 
     const result = await discoveryAgent.executeScrape({

@@ -242,11 +242,11 @@ async function searchPeoplePaid(params: ApolloSearchParams, apiKey: string): Pro
     searchBody.q_organization_keyword_tags = params.industries;
   }
 
-  if (params.seniorities?.length > 0) {
+  if (params.seniorities && params.seniorities.length > 0) {
     searchBody.person_seniorities = mapSeniorities(params.seniorities);
   }
 
-  if (params.employeeRanges?.length > 0) {
+  if (params.employeeRanges && params.employeeRanges.length > 0) {
     searchBody.organization_num_employees_ranges = params.employeeRanges;
   }
 
@@ -294,7 +294,7 @@ async function searchPeoplePaid(params: ApolloSearchParams, apiKey: string): Pro
       return { success: false, people: [], totalFound: 0, error: errorMessage, isPlanError };
     }
 
-    const data: ApolloPaidSearchResponse = await response.json();
+    const data = await response.json() as ApolloPaidSearchResponse;
 
     console.log(`📊 Apollo PAID search returned ${data.people?.length || 0} results`);
     console.log(`   Total available: ${data.pagination?.total_entries || 0}`);
@@ -341,13 +341,13 @@ async function searchPeopleFree(params: ApolloSearchParams, apiKey: string): Pro
     });
   }
 
-  if (params.seniorities?.length > 0) {
+  if (params.seniorities && params.seniorities.length > 0) {
     mapSeniorities(params.seniorities).forEach(s => {
       queryParams.append('person_seniorities[]', s);
     });
   }
 
-  if (params.employeeRanges?.length > 0) {
+  if (params.employeeRanges && params.employeeRanges.length > 0) {
     params.employeeRanges.forEach(range => {
       queryParams.append('organization_num_employees_ranges[]', range);
     });
@@ -396,7 +396,7 @@ async function searchPeopleFree(params: ApolloSearchParams, apiKey: string): Pro
       return { success: false, people: [], totalFound: 0, error: errorMessage };
     }
 
-    const data: ApolloSearchResponse = await response.json();
+    const data = await response.json() as ApolloSearchResponse;
 
     console.log(`📊 Apollo FREE search returned ${data.people?.length || 0} results`);
     console.log(`   Total available: ${data.pagination?.total_entries || 0}`);
@@ -453,7 +453,7 @@ async function enrichPeopleById(personIds: string[], apiKey: string): Promise<Ap
       return [];
     }
 
-    const data: ApolloBulkMatchResponse = await response.json();
+    const data = await response.json() as ApolloBulkMatchResponse;
     console.log(`✅ Enriched ${data.matches?.length || 0} people with contact info`);
 
     return data.matches || [];
@@ -635,7 +635,7 @@ export async function enrichContact(email: string): Promise<ApolloEnrichedPerson
       return null;
     }
 
-    const data = await response.json();
+    const data = await response.json() as { person?: ApolloEnrichedPerson };
     return data.person || null;
   } catch (error) {
     console.error('❌ Apollo enrichment error:', error);

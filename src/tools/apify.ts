@@ -1,19 +1,20 @@
 /**
- * Apify Leads Finder Integration
+ * Apify Leads Scraper Integration
  *
- * Uses the Apify actor "code_crafter/leads-finder" to generate B2B leads.
- * This actor is FREE (100 leads/run on free Apify plan) and doesn't require Apollo cookies.
+ * Uses the Apify actor "peakydev/leads-scraper-ppe" to generate B2B leads WITH emails.
+ *
+ * Pricing: $1 per 1,000 leads (uses Apify credits)
+ * Email Rate: 70-90% of leads include verified email addresses
  *
  * Features:
  * - Generates targeted B2B contact lists using advanced filters
- * - Returns verified emails, LinkedIn URLs, and company data
+ * - Returns verified emails, phone numbers, LinkedIn URLs, and company data
  * - Filters: job title, location, industry, company size, seniority
  *
  * Requirements:
- * - APIFY_API_TOKEN: Your Apify API token (free tier available)
+ * - APIFY_API_TOKEN: Your Apify API token with credits ($4.74 remaining)
  *
- * Apify Actor: https://apify.com/code_crafter/leads-finder
- * Pricing: FREE (100 leads/run) or $1.5/1k leads on paid plans
+ * Apify Actor: https://apify.com/peakydev/leads-scraper-ppe
  *
  * ╔══════════════════════════════════════════════════════════════════════════════╗
  * ║  IMPORTANT: Before modifying this file or switching to a new Apify actor,   ║
@@ -34,7 +35,12 @@ import type { CreateLead } from '../types/index.js';
 const APIFY_API_BASE = 'https://api.apify.com/v2';
 // Actor ID format uses tilde (~) not slash (/) for API calls
 // See: https://docs.apify.com/academy/api/run-actor-and-retrieve-data-via-api
-const LEADS_FINDER_ACTOR = 'code_crafter~leads-finder';
+//
+// ACTOR OPTIONS:
+// - 'code_crafter~leads-finder' - FREE but doesn't return emails reliably
+// - 'peakydev~leads-scraper-ppe' - $1/1k leads, 70-90% email rate (RECOMMENDED)
+//
+const LEADS_FINDER_ACTOR = 'peakydev~leads-scraper-ppe';
 
 // =============================================================================
 // Types
@@ -56,8 +62,8 @@ export interface ApifyScraperResult {
   error?: string;
 }
 
-// Input schema for code_crafter/leads-finder
-// See: https://apify.com/code_crafter/leads-finder
+// Input schema for leads scrapers (peakydev/leads-scraper-ppe uses similar schema)
+// See: https://apify.com/peakydev/leads-scraper-ppe
 interface LeadsFinderInput {
   // Job title filters
   contact_job_title?: string[];
