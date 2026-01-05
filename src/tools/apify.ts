@@ -101,8 +101,11 @@ interface ApifyRunResponse {
 }
 
 // Lead data from the Leads Finder output
+// Supports multiple actor formats:
+// - peakydev~leads-scraper-ppe: snake_case (first_name, last_name, job_title)
+// - pipelinelabs~lead-scraper-apollo-zoominfo-lusha-ppe: camelCase (firstName, lastName, position)
 interface LeadsFinderResult {
-  // Contact info
+  // Contact info - snake_case (peakydev)
   first_name?: string;
   last_name?: string;
   full_name?: string;
@@ -111,13 +114,21 @@ interface LeadsFinderResult {
   personal_email?: string;
   phone?: string;
   mobile_number?: string;
-  // Professional info
+  // Contact info - camelCase (pipelinelabs)
+  firstName?: string;
+  lastName?: string;
+  fullName?: string;
+  mobilePhone?: string;
+  // Professional info - snake_case
   title?: string;
   job_title?: string;
   seniority?: string;
   linkedin_url?: string;
   linkedin?: string;
-  // Company info
+  // Professional info - camelCase (pipelinelabs)
+  position?: string;
+  linkedinUrl?: string;
+  // Company info - snake_case
   company_name?: string;
   company?: string;
   organization?: string;
@@ -127,6 +138,12 @@ interface LeadsFinderResult {
   industry?: string;
   company_size?: string;
   company_linkedin?: string;
+  // Company info - camelCase (pipelinelabs)
+  orgName?: string;
+  orgWebsite?: string;
+  orgIndustry?: string;
+  orgSize?: string;
+  orgLinkedin?: string;
   // Location
   city?: string;
   state?: string;
@@ -359,8 +376,19 @@ function getEmployeeRangeCodes(min: number, max: number): string[] {
 function transformLeadsFinderResult(lead: LeadsFinderResult): CreateLead | null {
   const email = lead.email || lead.personal_email;
 
+  // Parse name - support both snake_case and camelCase formats
+  let firstName = lead.first_name || lead.firstName || null;
+  let lastName = lead.last_name || lead.lastName || null;
+  const fullName = lead.full_name || lead.fullName;
+
+  if (!firstName && !lastName && fullName) {
+    const nameParts = fullName.split(' ');
+    firstName = nameParts[0] || null;
+    lastName = nameParts.slice(1).join(' ') || null;
+  }
+
   // Log what we received for debugging
-  console.log(`   Processing lead: ${lead.first_name} ${lead.last_name} - email: ${email || 'NONE'}, status: ${lead.email_status || 'unknown'}`);
+  console.log(`   Processing lead: ${firstName} ${lastName} - email: ${email || 'NONE'}, status: ${lead.email_status || 'unknown'}`);
 
   if (!email) {
     console.log(`   ⚠️ Skipping lead - no email address`);
@@ -371,16 +399,6 @@ function transformLeadsFinderResult(lead: LeadsFinderResult): CreateLead | null 
   if (lead.email_status === 'invalid' || lead.email_status === 'bounced') {
     console.log(`   ⚠️ Skipping lead - email status: ${lead.email_status}`);
     return null;
-  }
-
-  // Parse name
-  let firstName = lead.first_name || null;
-  let lastName = lead.last_name || null;
-
-  if (!firstName && !lastName && lead.full_name) {
-    const nameParts = lead.full_name.split(' ');
-    firstName = nameParts[0] || null;
-    lastName = nameParts.slice(1).join(' ') || null;
   }
 
   // Parse location
@@ -397,17 +415,18 @@ function transformLeadsFinderResult(lead: LeadsFinderResult): CreateLead | null 
     }
   }
 
+  // Map fields - support both snake_case (peakydev) and camelCase (pipelinelabs) formats
   return {
     first_name: firstName,
     last_name: lastName,
     email: email.toLowerCase(),
-    phone: lead.phone || lead.mobile_number || null,
-    linkedin_url: lead.linkedin_url || lead.linkedin || null,
-    company_name: lead.company_name || lead.company || lead.organization || null,
-    job_title: lead.title || lead.job_title || null,
+    phone: lead.phone || lead.mobile_number || lead.mobilePhone || null,
+    linkedin_url: lead.linkedin_url || lead.linkedin || lead.linkedinUrl || null,
+    company_name: lead.company_name || lead.company || lead.organization || lead.orgName || null,
+    job_title: lead.title || lead.job_title || lead.position || null,
     seniority: lead.seniority || null,
-    industry: lead.company_industry || lead.industry || null,
-    website_url: lead.company_website || lead.company_domain || null,
+    industry: lead.company_industry || lead.industry || lead.orgIndustry || null,
+    website_url: lead.company_website || lead.company_domain || lead.orgWebsite || null,
     city,
     state,
     country,
