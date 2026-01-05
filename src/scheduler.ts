@@ -189,6 +189,7 @@ function cleanEmailBody(emailBody: string): string {
 
 interface SchedulerConfig {
     schedule: string;
+    researchSchedule: string;  // Second daily run for research only
     timezone: string;
     limit: number;
     slackWebhookUrl?: string;
@@ -197,7 +198,8 @@ interface SchedulerConfig {
 
 function getSchedulerConfig(): SchedulerConfig {
     return {
-        schedule: process.env.PIPELINE_SCHEDULE || '0 9 * * *',
+        schedule: process.env.PIPELINE_SCHEDULE || '0 9 * * *',           // Full pipeline at 9 AM
+        researchSchedule: process.env.RESEARCH_SCHEDULE || '0 17 * * *',  // Research-only at 5 PM
         timezone: process.env.PIPELINE_TIMEZONE || 'America/New_York',
         limit: parseInt(process.env.PIPELINE_LIMIT || '10', 10),
         slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
@@ -625,7 +627,7 @@ async function sendEmailViaResend(
             }),
         });
 
-        const data = await response.json();
+        const data = await response.json() as { message?: string };
         if (!response.ok) {
             return { success: false, error: data.message || 'Unknown error' };
         }
@@ -795,6 +797,66 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
 }
 
 // ============================================================================
+// Research-Only Pipeline (for second daily run)
+// ============================================================================
+
+async function runResearchOnlyPipeline(limit: number): Promise<PipelineResult> {
+    const startTime = Date.now();
+    const errors: string[] = [];
+
+    console.log(`
+╔═══════════════════════════════════════════════════════════════╗
+║          🔬 AUTONOME RESEARCH PIPELINE (Afternoon Run)        ║
+╚═══════════════════════════════════════════════════════════════╝
+`);
+
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_ANON_KEY;
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+
+    if (!supabaseUrl || !supabaseKey || !anthropicKey) {
+        throw new Error('Missing required environment variables');
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    const anthropic = new Anthropic({ apiKey: anthropicKey });
+
+    // Test connection
+    try {
+        const { error } = await supabase.from('leads').select('count').limit(1);
+        if (error) throw error;
+        console.log('✅ Database connected');
+    } catch (error: any) {
+        const msg = `Database connection failed: ${error.message || JSON.stringify(error)}`;
+        console.error(`❌ ${msg}`);
+        return { researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [msg] };
+    }
+
+    let researched = 0;
+
+    // Only run research stage (process scraped leads)
+    try { researched = await runResearchStage(supabase, anthropic, limit); }
+    catch (error) {
+        const msg = `Research: ${error instanceof Error ? error.message : String(error)}`;
+        errors.push(msg);
+        log('ERROR', msg);
+    }
+
+    const duration = (Date.now() - startTime) / 1000;
+
+    console.log(`
+┌─────────────────────────────────────────────────────────────┐
+│              🏁 RESEARCH PIPELINE SUMMARY                   │
+├─────────────────────────────────────────────────────────────┤
+│  🔬 Leads Researched:      ${String(researched).padStart(5)}                          │
+│  ⏱️  Duration:            ${duration.toFixed(1).padStart(6)}s                         │
+└─────────────────────────────────────────────────────────────┘
+`);
+
+    return { researched, emailsCreated: 0, emailsSent: 0, duration, errors };
+}
+
+// ============================================================================
 // Scheduler
 // ============================================================================
 
@@ -811,6 +873,7 @@ function describeCron(expression: string): string {
 function startScheduler(config: SchedulerConfig): void {
     log('INFO', '📅 Starting Autonome Sales Pipeline Scheduler', {
         schedule: config.schedule,
+        researchSchedule: config.researchSchedule,
         timezone: config.timezone,
         limit: config.limit,
     });
@@ -820,17 +883,23 @@ function startScheduler(config: SchedulerConfig): void {
         process.exit(1);
     }
 
-    log('INFO', `⏰ Schedule: ${describeCron(config.schedule)}`);
+    if (!cron.validate(config.researchSchedule)) {
+        log('ERROR', 'Invalid research cron expression', { schedule: config.researchSchedule });
+        process.exit(1);
+    }
+
+    log('INFO', `⏰ Full Pipeline: ${describeCron(config.schedule)}`);
+    log('INFO', `🔬 Research Run: ${describeCron(config.researchSchedule)}`);
     log('INFO', `📧 Senders: ${SENDERS.map(s => s.name).join(', ')}`);
 
-    const task = cron.schedule(
+    // Full pipeline (morning) - discovery, research, outreach, sending
+    const fullPipelineTask = cron.schedule(
         config.schedule,
         async () => {
             try {
                 const result = await runPipeline(config.limit);
                 await sendSlackNotification(result, config);
             } catch (error) {
-                // Catch any unhandled exceptions and send critical notification
                 await sendCriticalFailureNotification(
                     error instanceof Error ? error : new Error(String(error)),
                     'Pipeline Execution (scheduled)',
@@ -838,13 +907,33 @@ function startScheduler(config: SchedulerConfig): void {
                 );
             }
         },
-        { scheduled: true, timezone: config.timezone }
+        { timezone: config.timezone }
     );
 
-    process.on('SIGINT', () => { task.stop(); process.exit(0); });
-    process.on('SIGTERM', () => { task.stop(); process.exit(0); });
+    // Research-only pipeline (afternoon) - processes any scraped leads
+    const researchTask = cron.schedule(
+        config.researchSchedule,
+        async () => {
+            try {
+                const result = await runResearchOnlyPipeline(config.limit);
+                await sendSlackNotification(result, config);
+            } catch (error) {
+                await sendCriticalFailureNotification(
+                    error instanceof Error ? error : new Error(String(error)),
+                    'Research Pipeline (scheduled)',
+                    config
+                );
+            }
+        },
+        { timezone: config.timezone }
+    );
 
-    log('SUCCESS', '✅ Scheduler started. Waiting for next scheduled run...');
+    process.on('SIGINT', () => { fullPipelineTask.stop(); researchTask.stop(); process.exit(0); });
+    process.on('SIGTERM', () => { fullPipelineTask.stop(); researchTask.stop(); process.exit(0); });
+
+    log('SUCCESS', '✅ Scheduler started with 2 daily runs:');
+    log('INFO', '   📋 9 AM: Full pipeline (discover → research → outreach → send)');
+    log('INFO', '   🔬 5 PM: Research only (process any new scraped leads)');
     log('INFO', 'Press Ctrl+C to stop');
 }
 
@@ -893,10 +982,15 @@ Options:
   --help, -h     Show this help message
 
 Environment Variables:
-  PIPELINE_SCHEDULE    Cron expression (default: "0 9 * * *" = 9 AM daily)
+  PIPELINE_SCHEDULE    Cron for full pipeline (default: "0 9 * * *" = 9 AM daily)
+  RESEARCH_SCHEDULE    Cron for research-only run (default: "0 17 * * *" = 5 PM daily)
   PIPELINE_TIMEZONE    Timezone (default: "America/New_York")
   PIPELINE_LIMIT       Max leads per stage (default: 10)
   SLACK_WEBHOOK_URL    Slack webhook for notifications (REQUIRED for alerts!)
+
+Pipeline Schedules:
+  - 9 AM: Full pipeline (discover → research → outreach → send)
+  - 5 PM: Research only (process any new scraped leads from Slack discovery)
 
 Senders Configured:
 ${SENDERS.map(s => `  - ${s.name} (${s.email}) - ${s.title}`).join('\n')}

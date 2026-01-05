@@ -12,6 +12,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { anthropicConfig } from '../config/index.js';
 import { leadsDb, eventsDb } from '../db/index.js';
 import { scrapeApollo, normalizeSearchParams, buildEmployeeRanges, type ApolloSearchParams } from '../tools/apify.js';
+import { researchAgent } from '../agents/research/index.js';
 import { ICP, ICP1_SMB_OPS, ICP2_AGENCIES, ICP3_SAAS, POSITIONING_ANGLES } from '../config/icp.js';
 import {
     getOrCreateConversation,
@@ -32,18 +33,23 @@ const SYSTEM_PROMPT = `You are the Autonome Sales Agent, an AI assistant for a B
    - Can search Apollo.io for leads by location, industry, job title, seniority
    - Default ICP targets SMB Ops/RevOps leaders in the US (20-120 employees)
 
-2. **Pipeline Stats** - Show current pipeline statistics
+2. **Lead Research** - Research scraped leads to gather insights
+   - Research pending leads (status: scraped) to find pain points and personalization opportunities
+   - Can research a specific number of leads or a specific lead by email
+   - Updates lead status from "scraped" to "researched"
+
+3. **Pipeline Stats** - Show current pipeline statistics
    - Count leads by status (scraped, researched, email_1_sent, etc.)
 
-3. **Lead Search** - Search existing leads in the database
+4. **Lead Search** - Search existing leads in the database
    - Search by email, company name, or other fields
 
-4. **ICP Information** - Explain the configured Ideal Customer Profiles
+5. **ICP Information** - Explain the configured Ideal Customer Profiles
    - ICP1: SMB Ops/RevOps (primary)
    - ICP2: Agencies/Consultancies
    - ICP3: SaaS Platforms
 
-5. **General Q&A** - Answer questions about the sales system
+6. **General Q&A** - Answer questions about the sales system
 
 ## Current ICP Configuration
 
@@ -58,13 +64,14 @@ Primary ICP (ICP1 - SMB Ops/RevOps):
 
 When you need to execute an action, respond with JSON:
 {
-  "action": "discover" | "stats" | "search" | "info" | "clear" | "chat",
+  "action": "discover" | "research" | "stats" | "search" | "info" | "clear" | "chat",
   "parameters": { ... },
   "message": "Human-readable response"
 }
 
 Actions:
 - **discover**: Search for new leads. Parameters: { locations, industries, jobTitles, seniorities, maxResults }
+- **research**: Research scraped leads. Parameters: { count } (number of leads to research, default 5) OR { email } (specific lead email)
 - **stats**: Get pipeline statistics. Parameters: {}
 - **search**: Search existing leads. Parameters: { query }
 - **info**: Provide information. Parameters: { topic }
@@ -105,6 +112,20 @@ Response: {
   "action": "info",
   "parameters": { "topic": "icp" },
   "message": "Our primary ICP targets ops-heavy B2B SMBs..."
+}
+
+User: "Research 5 leads"
+Response: {
+  "action": "research",
+  "parameters": { "count": 5 },
+  "message": "Starting research on 5 scraped leads..."
+}
+
+User: "Research the lead john@example.com"
+Response: {
+  "action": "research",
+  "parameters": { "email": "john@example.com" },
+  "message": "Researching lead john@example.com..."
 }
 `;
 
@@ -207,6 +228,9 @@ export class ConversationalAgent {
             case 'discover':
                 return this.executeDiscovery(parameters, message);
 
+            case 'research':
+                return this.executeResearch(parameters, message);
+
             case 'stats':
                 return this.executeStats(message);
 
@@ -282,6 +306,84 @@ export class ConversationalAgent {
             return response;
         } catch (error) {
             return `❌ Discovery error: ${error instanceof Error ? error.message : 'Unknown error'}`;
+        }
+    }
+
+    /**
+     * Execute lead research
+     */
+    private async executeResearch(params: any, initialMessage: string): Promise<string> {
+        try {
+            // Research a specific lead by email
+            if (params?.email) {
+                const result = await researchAgent.researchByEmail(params.email);
+
+                if (!result.success) {
+                    return `❌ Research failed: ${result.error || result.message}`;
+                }
+
+                const data = result.data as { leadId: string; analysis: any };
+                const analysis = data?.analysis;
+
+                let response = `✅ **Research Complete!**\n\n`;
+                response += `📧 **Lead:** ${params.email}\n\n`;
+
+                if (analysis) {
+                    response += `**Personal Profile:**\n${analysis.personalProfile}\n\n`;
+                    response += `**Company Profile:**\n${analysis.companyProfile}\n\n`;
+
+                    if (analysis.painPoints?.length > 0) {
+                        response += `**Pain Points:**\n`;
+                        for (const pp of analysis.painPoints.slice(0, 3)) {
+                            response += `• ${pp.pain}\n`;
+                        }
+                        response += `\n`;
+                    }
+
+                    if (analysis.personalizationOpportunities?.length > 0) {
+                        response += `**Personalization Hooks:**\n`;
+                        for (const po of analysis.personalizationOpportunities.slice(0, 3)) {
+                            response += `• [${po.type}] ${po.hook}\n`;
+                        }
+                    }
+                }
+
+                return response;
+            }
+
+            // Research multiple leads by count
+            const count = params?.count || 5;
+            const result = await researchAgent.researchPendingLeads(count);
+
+            if (!result.success) {
+                return `❌ Research failed: ${result.error || result.message}`;
+            }
+
+            const data = result.data as { successful: number; failed: number; total: number } | undefined;
+
+            let response = `✅ **Batch Research Complete!**\n\n`;
+            response += `📊 **Results:**\n`;
+            response += `• Total processed: ${data?.total || 0}\n`;
+            response += `• Successful: ${data?.successful || 0}\n`;
+            response += `• Failed: ${data?.failed || 0}\n`;
+
+            if (data?.successful === 0 && data?.total === 0) {
+                response += `\n_No leads with status "scraped" found. Discover some leads first!_`;
+            }
+
+            // Log event
+            await eventsDb.log({
+                event_type: 'slack_research',
+                event_data: {
+                    requested_count: count,
+                    successful: data?.successful || 0,
+                    failed: data?.failed || 0,
+                },
+            });
+
+            return response;
+        } catch (error) {
+            return `❌ Research error: ${error instanceof Error ? error.message : 'Unknown error'}`;
         }
     }
 
