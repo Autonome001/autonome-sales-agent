@@ -14,6 +14,18 @@
  *
  * Apify Actor: https://apify.com/code_crafter/leads-finder
  * Pricing: FREE (100 leads/run) or $1.5/1k leads on paid plans
+ *
+ * ╔══════════════════════════════════════════════════════════════════════════════╗
+ * ║  IMPORTANT: Before modifying this file or switching to a new Apify actor,   ║
+ * ║  READ THE INTEGRATION GUIDE: docs/APIFY_INTEGRATION_GUIDE.md                ║
+ * ║                                                                              ║
+ * ║  Key learnings documented there:                                            ║
+ * ║  - Actor ID format: Use tilde (~) not slash (/) → user~actor                ║
+ * ║  - All filter values must be LOWERCASE                                      ║
+ * ║  - Seniority uses underscore: c_suite (not c-suite)                         ║
+ * ║  - Industries must be from a fixed valid list                               ║
+ * ║  - See guide for full mapping tables and troubleshooting                    ║
+ * ╚══════════════════════════════════════════════════════════════════════════════╝
  */
 
 import { apifyConfig } from '../config/index.js';
