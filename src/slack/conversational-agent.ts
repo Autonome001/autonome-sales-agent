@@ -351,8 +351,8 @@ export class ConversationalAgent {
                 return response;
             }
 
-            // Research multiple leads by count
-            const count = params?.count || 5;
+            // Research multiple leads by count (default 25 to match PIPELINE_LIMIT)
+            const count = params?.count || 25;
             const result = await researchAgent.researchPendingLeads(count);
 
             if (!result.success) {

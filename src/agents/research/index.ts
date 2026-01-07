@@ -273,6 +273,7 @@ ${reviewsContext ? reviewsContext.substring(0, 5000) : 'No external review data 
 
     /**
      * Research all leads with 'scraped' status
+     * Uses parallel processing with concurrency limit for speed
      */
     async researchPendingLeads(limit: number = 10): Promise<AgentResult> {
         const leads = await leadsDb.findByStatus('scraped', limit);
@@ -285,22 +286,33 @@ ${reviewsContext ? reviewsContext.substring(0, 5000) : 'No external review data 
             };
         }
 
-        console.log(`\n📚 Starting batch research for ${leads.length} leads...\n`);
+        console.log(`\n📚 Starting batch research for ${leads.length} leads (parallel processing)...\n`);
 
-        let successful = 0;
-        let failed = 0;
+        // Process leads in parallel with concurrency limit of 5
+        // This balances speed vs API rate limits
+        const CONCURRENCY = 5;
+        const results: { success: boolean }[] = [];
 
-        for (const lead of leads) {
-            const result = await this.researchLead(lead);
-            if (result.success) {
-                successful++;
-            } else {
-                failed++;
+        // Process in batches of CONCURRENCY
+        for (let i = 0; i < leads.length; i += CONCURRENCY) {
+            const batch = leads.slice(i, i + CONCURRENCY);
+            console.log(`   Processing batch ${Math.floor(i / CONCURRENCY) + 1}/${Math.ceil(leads.length / CONCURRENCY)} (${batch.length} leads)...`);
+
+            // Process batch in parallel
+            const batchResults = await Promise.all(
+                batch.map(lead => this.researchLead(lead))
+            );
+
+            results.push(...batchResults);
+
+            // Small delay between batches to avoid rate limits
+            if (i + CONCURRENCY < leads.length) {
+                await new Promise(resolve => setTimeout(resolve, 500));
             }
-
-            // Small delay between leads to avoid rate limits
-            await new Promise(resolve => setTimeout(resolve, 1000));
         }
+
+        const successful = results.filter(r => r.success).length;
+        const failed = results.filter(r => !r.success).length;
 
         return {
             success: true,
