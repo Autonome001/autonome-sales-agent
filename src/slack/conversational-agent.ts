@@ -71,7 +71,7 @@ When you need to execute an action, respond with JSON:
 
 Actions:
 - **discover**: Search for new leads. Parameters: { locations, industries, jobTitles, seniorities, maxResults }
-- **research**: Research scraped leads. Parameters: { count } (number of leads to research, default 5) OR { email } (specific lead email)
+- **research**: Research scraped leads. Parameters: { count } (number of leads to research, default 25) OR { email } (specific lead email)
 - **stats**: Get pipeline statistics. Parameters: {}
 - **search**: Search existing leads. Parameters: { query }
 - **info**: Provide information. Parameters: { topic }
@@ -114,11 +114,11 @@ Response: {
   "message": "Our primary ICP targets ops-heavy B2B SMBs..."
 }
 
-User: "Research 5 leads"
+User: "Research the leads"
 Response: {
   "action": "research",
-  "parameters": { "count": 5 },
-  "message": "Starting research on 5 scraped leads..."
+  "parameters": {},
+  "message": "Starting research on scraped leads (default 25)..."
 }
 
 User: "Research the lead john@example.com"

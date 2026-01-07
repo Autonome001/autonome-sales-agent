@@ -137,7 +137,21 @@ export class ResearchAgent {
                 googleSearch(`${companyName} Trustpilot reviews`)
             ]);
 
-            const relevantUrl = g2Results[0]?.url || trustpilotResults[0]?.url;
+            // Filter to only actual review site URLs (ignore garbage results from free actors)
+            const isRelevantUrl = (url: string) => {
+                if (!url) return false;
+                const lower = url.toLowerCase();
+                return lower.includes('g2.com') ||
+                       lower.includes('trustpilot.com') ||
+                       lower.includes('capterra.com') ||
+                       lower.includes('glassdoor.com') ||
+                       lower.includes('linkedin.com') ||
+                       lower.includes(companyName.toLowerCase().replace(/\s+/g, ''));
+            };
+
+            const g2Url = g2Results.find(r => isRelevantUrl(r.url))?.url;
+            const trustpilotUrl = trustpilotResults.find(r => isRelevantUrl(r.url))?.url;
+            const relevantUrl = g2Url || trustpilotUrl;
             let reviewsText = '';
 
             if (relevantUrl) {
