@@ -32,6 +32,7 @@ interface Sender {
 
 import { ICP } from './config/icp.js';
 import { discoveryAgent } from './agents/discovery/index.js';
+import { researchAgent } from './agents/research/index.js';
 import { buildEmployeeRanges } from './tools/apify.js';
 
 async function runDiscoveryStage(limit: number): Promise<number> {
@@ -45,7 +46,7 @@ async function runDiscoveryStage(limit: number): Promise<number> {
         locations: ICP.locations,
         seniorities: ICP.seniorities,
         employeeRanges: buildEmployeeRanges(ICP.employeeRange.min, ICP.employeeRange.max),
-        maxResults: Math.min(limit, ICP.maxResultsPerRun)
+        maxResults: limit  // Use PIPELINE_LIMIT directly for discovery
     });
 
     // Handle discovery failures gracefully - don't crash the pipeline
@@ -231,11 +232,19 @@ function log(level: 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS', message: string, data
 // ============================================================================
 
 interface PipelineResult {
+    discovered: number;
     researched: number;
     emailsCreated: number;
     emailsSent: number;
     duration: number;
     errors: string[];
+    // Follow-up and engagement stats (optional for backward compatibility)
+    followUpStats?: {
+        email2Pending: number;  // Leads waiting for Email 2 (3+ days after Email 1)
+        email3Pending: number;  // Leads waiting for Email 3 (5+ days after Email 1)
+        totalReplies: number;   // Total leads that have replied
+        interestedReplies: number;  // Leads marked as interested
+    };
 }
 
 // ============================================================================
@@ -267,13 +276,43 @@ async function sendSlackNotification(
         {
             type: 'section',
             fields: [
-                { type: 'mrkdwn', text: `*Leads Researched:*\n${result.researched}` },
-                { type: 'mrkdwn', text: `*Emails Created:*\n${result.emailsCreated}` },
-                { type: 'mrkdwn', text: `*Emails Sent:*\n${result.emailsSent}` },
-                { type: 'mrkdwn', text: `*Duration:*\n${result.duration.toFixed(1)}s` },
+                { type: 'mrkdwn', text: `*🔎 Discovered:*\n${result.discovered}` },
+                { type: 'mrkdwn', text: `*🔬 Researched:*\n${result.researched}` },
+                { type: 'mrkdwn', text: `*📧 Created:*\n${result.emailsCreated}` },
+                { type: 'mrkdwn', text: `*📤 Sent:*\n${result.emailsSent}` },
             ],
         },
     ];
+
+    // Add follow-up stats section if available
+    if (result.followUpStats) {
+        blocks.push({
+            type: 'divider',
+        });
+        blocks.push({
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: `*📬 Follow-up & Engagement Status:*`,
+            },
+        });
+        blocks.push({
+            type: 'section',
+            fields: [
+                { type: 'mrkdwn', text: `*Email 2 Pending:*\n${result.followUpStats.email2Pending} leads` },
+                { type: 'mrkdwn', text: `*Email 3 Pending:*\n${result.followUpStats.email3Pending} leads` },
+                { type: 'mrkdwn', text: `*Total Replies:*\n${result.followUpStats.totalReplies}` },
+                { type: 'mrkdwn', text: `*🎉 Interested:*\n${result.followUpStats.interestedReplies}` },
+            ],
+        });
+    }
+
+    blocks.push({
+        type: 'context',
+        elements: [
+            { type: 'mrkdwn', text: `⏱️ Duration: ${result.duration.toFixed(1)}s` },
+        ],
+    });
 
     // Include error details in notification
     if (hasErrors) {
@@ -380,15 +419,18 @@ interface Lead {
     job_title?: string;
     linkedin_url?: string;
     status: string;
-    research_summary?: string;
-    pain_points?: string[];
-    talking_points?: string[];
+    // Research data stored as JSONB (proper field)
+    research_data?: Record<string, any> | null;
+    research_completed_at?: string | null;
     email_1_subject?: string;
     email_1_body?: string;
     email_2_body?: string;
     email_3_subject?: string;
     email_3_body?: string;
     assigned_sender?: string;
+    // Reply tracking fields
+    replied_at?: string | null;
+    reply_category?: string | null;
 }
 
 async function getLeadsByStatus(supabase: SupabaseClient, status: string, limit: number): Promise<Lead[]> {
@@ -409,71 +451,86 @@ async function updateLead(supabase: SupabaseClient, id: string, updates: Partial
     if (error) throw error;
 }
 
-// ============================================================================
-// Stage 1: Research
-// ============================================================================
+async function getFollowUpStats(supabase: SupabaseClient): Promise<{
+    email2Pending: number;
+    email3Pending: number;
+    totalReplies: number;
+    interestedReplies: number;
+}> {
+    const email2DelayDays = parseInt(process.env.EMAIL_2_DELAY_DAYS || '3', 10);
+    const email3DelayDays = parseInt(process.env.EMAIL_3_DELAY_DAYS || '5', 10);
 
-async function researchLead(anthropic: Anthropic, lead: Lead): Promise<{ summary: string; painPoints: string[]; talkingPoints: string[] }> {
-    const prompt = `You are a B2B sales research analyst. Analyze this lead and provide insights.
+    const email2Cutoff = new Date();
+    email2Cutoff.setDate(email2Cutoff.getDate() - email2DelayDays);
 
-Lead Information:
-- Name: ${lead.first_name} ${lead.last_name}
-- Title: ${lead.job_title || 'Unknown'}
-- Company: ${lead.company_name || 'Unknown'}
-- LinkedIn: ${lead.linkedin_url || 'Not provided'}
+    const email3Cutoff = new Date();
+    email3Cutoff.setDate(email3Cutoff.getDate() - email3DelayDays);
 
-Provide:
-1. A brief summary (2-3 sentences)
-2. 3 potential pain points
-3. 3 talking points for outreach
+    // Count leads pending Email 2 (status = email_1_sent, sent > 3 days ago)
+    const { count: email2Count } = await supabase
+        .from('leads')
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'email_1_sent')
+        .lt('email_1_sent_at', email2Cutoff.toISOString())
+        .not('email_2_body', 'is', null);
 
-Format as JSON:
-{
-  "summary": "...",
-  "painPoints": ["...", "...", "..."],
-  "talkingPoints": ["...", "...", "..."]
-}`;
+    // Count leads pending Email 3 (status = email_2_sent, Email 1 sent > 5 days ago)
+    const { count: email3Count } = await supabase
+        .from('leads')
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'email_2_sent')
+        .lt('email_1_sent_at', email3Cutoff.toISOString())
+        .not('email_3_body', 'is', null);
 
-    const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
-        messages: [{ role: 'user', content: prompt }],
-    });
+    // Count total replies (leads with replied_at set)
+    const { count: totalReplies } = await supabase
+        .from('leads')
+        .select('*', { count: 'exact', head: true })
+        .not('replied_at', 'is', null);
 
-    const text = response.content[0].type === 'text' ? response.content[0].text : '';
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('Failed to parse research response');
-    return JSON.parse(jsonMatch[0]);
+    // Count interested replies (leads in 'engaged' status or with reply_category = 'interested')
+    const { count: interestedCount } = await supabase
+        .from('leads')
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'engaged');
+
+    return {
+        email2Pending: email2Count || 0,
+        email3Pending: email3Count || 0,
+        totalReplies: totalReplies || 0,
+        interestedReplies: interestedCount || 0,
+    };
 }
+
+// ============================================================================
+// Stage 1: Research (uses researchAgent for proper research_data population)
+// ============================================================================
 
 async function runResearchStage(supabase: SupabaseClient, anthropic: Anthropic, limit: number): Promise<number> {
     console.log('\n┌─────────────────────────────────────────────────────────────┐');
     console.log('│ STAGE 1: RESEARCH                                           │');
     console.log('└─────────────────────────────────────────────────────────────┘');
 
-    const leads = await getLeadsByStatus(supabase, 'scraped', limit);
-    console.log(`📋 Found ${leads.length} leads to research`);
+    // Use the proper research agent (same as Slack uses)
+    // This ensures research_data and research_completed_at are populated
+    const result = await researchAgent.researchPendingLeads(limit);
 
-    let processed = 0;
-    for (const lead of leads) {
-        try {
-            console.log(`\n🔍 Researching: ${lead.email}`);
-            const research = await researchLead(anthropic, lead);
+    if (!result.success) {
+        console.error(`   ❌ Research failed: ${result.error || result.message}`);
+        return 0;
+    }
 
-            // Assign a sender to this lead for consistent communication
+    const data = result.data as { successful: number; failed: number; total: number } | undefined;
+    const processed = data?.successful || 0;
+
+    // Assign senders to newly researched leads
+    const researchedLeads = await getLeadsByStatus(supabase, 'researched', limit);
+    for (const lead of researchedLeads) {
+        if (!lead.assigned_sender) {
             const assignedSender = getNextSender();
-
             await updateLead(supabase, lead.id, {
-                research_summary: research.summary,
-                pain_points: research.painPoints,
-                talking_points: research.talkingPoints,
                 assigned_sender: assignedSender.email,
-                status: 'researched',
             });
-            console.log(`   ✅ Research complete (assigned to ${assignedSender.name})`);
-            processed++;
-        } catch (error) {
-            console.error(`   ❌ Failed: ${error instanceof Error ? error.message : error}`);
         }
     }
 
@@ -486,6 +543,23 @@ async function runResearchStage(supabase: SupabaseClient, anthropic: Anthropic, 
 // ============================================================================
 
 async function generateEmails(anthropic: Anthropic, lead: Lead, sender: Sender): Promise<{ subject1: string; body1: string; body2: string; subject3: string; body3: string }> {
+    // Extract research insights from the research_data JSONB field
+    const researchData = lead.research_data as { analysis?: {
+        personalProfile?: string;
+        companyProfile?: string;
+        painPoints?: Array<{ pain: string; evidence: string; solution: string }>;
+        personalizationOpportunities?: Array<{ type: string; hook: string; evidence: string }>;
+        uniqueFacts?: string[];
+        interests?: string[];
+    }} | null;
+
+    const analysis = researchData?.analysis;
+    const personalProfile = analysis?.personalProfile || '';
+    const companyProfile = analysis?.companyProfile || '';
+    const painPoints = analysis?.painPoints?.map(p => p.pain).join(', ') || 'Not available';
+    const hooks = analysis?.personalizationOpportunities?.map(p => p.hook).join('; ') || '';
+    const uniqueFacts = analysis?.uniqueFacts?.join(', ') || '';
+
     const prompt = `You are an expert cold email copywriter. Write a 3-email sequence.
 
 CRITICAL INSTRUCTIONS - READ CAREFULLY:
@@ -504,9 +578,12 @@ Lead Information:
 
 You are writing as: ${sender.name}, ${sender.title} at Autonome
 
-Research Summary: ${lead.research_summary}
-Pain Points: ${lead.pain_points?.join(', ')}
-Talking Points: ${lead.talking_points?.join(', ')}
+Research Insights:
+- Personal Profile: ${personalProfile}
+- Company Profile: ${companyProfile}
+- Pain Points: ${painPoints}
+- Personalization Hooks: ${hooks}
+- Unique Facts: ${uniqueFacts}
 
 Write 3 emails (under 100 words each). Be conversational, not salesy.
 Each email should end with a question or soft CTA - NOTHING ELSE after that.
@@ -665,8 +742,18 @@ async function runSendingStage(supabase: SupabaseClient, limit: number): Promise
     console.log('│ STAGE 3: SENDING (Email 1)                                  │');
     console.log('└─────────────────────────────────────────────────────────────┘');
 
+    // Debug: Check status counts before sending
+    const { data: statusCounts } = await supabase
+        .from('leads')
+        .select('status');
+    const counts: Record<string, number> = {};
+    for (const row of statusCounts || []) {
+        counts[row.status] = (counts[row.status] || 0) + 1;
+    }
+    console.log('📊 Current lead status counts:', JSON.stringify(counts));
+
     const leads = await getLeadsByStatus(supabase, 'ready', limit);
-    console.log(`📋 Found ${leads.length} leads ready to send`);
+    console.log(`📋 Found ${leads.length} leads ready to send (limit: ${limit})`);
 
     let sent = 0;
     for (const lead of leads) {
@@ -723,7 +810,8 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
 `);
 
     const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_ANON_KEY;
+    // Use service role key to bypass RLS - important for backend operations
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
 
     if (!supabaseUrl || !supabaseKey || !anthropicKey) {
@@ -751,6 +839,7 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
 
     let discovered = 0, researched = 0, emailsCreated = 0, emailsSent = 0;
 
+    // Stage 0: Discovery - find new leads
     try { discovered = await runDiscoveryStage(limit); }
     catch (error) {
         const msg = `Discovery: ${error instanceof Error ? error.message : String(error)}`;
@@ -758,6 +847,7 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
         log('ERROR', msg);
     }
 
+    // Stage 1: Research - process ALL scraped leads (including newly discovered)
     try { researched = await runResearchStage(supabase, anthropic, limit); }
     catch (error) {
         const msg = `Research: ${error instanceof Error ? error.message : String(error)}`;
@@ -765,6 +855,7 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
         log('ERROR', msg);
     }
 
+    // Stage 2: Outreach - process ALL researched leads (including newly researched)
     try { emailsCreated = await runOutreachStage(supabase, anthropic, limit); }
     catch (error) {
         const msg = `Outreach: ${error instanceof Error ? error.message : String(error)}`;
@@ -772,6 +863,8 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
         log('ERROR', msg);
     }
 
+    // Stage 3: Sending - process ALL ready leads (including newly created emails)
+    // This now includes leads that just went through stages 1-2 in this same run
     try { emailsSent = await runSendingStage(supabase, limit); }
     catch (error) {
         const msg = `Sending: ${error instanceof Error ? error.message : String(error)}`;
@@ -780,6 +873,15 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
     }
 
     const duration = (Date.now() - startTime) / 1000;
+
+    // Gather follow-up and engagement stats
+    let followUpStats;
+    try {
+        followUpStats = await getFollowUpStats(supabase);
+        console.log('📊 Follow-up stats:', JSON.stringify(followUpStats));
+    } catch (error) {
+        log('WARN', `Failed to get follow-up stats: ${error instanceof Error ? error.message : String(error)}`);
+    }
 
     console.log(`
 ┌─────────────────────────────────────────────────────────────┐
@@ -790,10 +892,16 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
 │  📧 Email Sequences Created: ${String(emailsCreated).padStart(3)}                          │
 │  📤 Emails Sent:           ${String(emailsSent).padStart(5)}                          │
 │  ⏱️  Duration:            ${duration.toFixed(1).padStart(6)}s                         │
+├─────────────────────────────────────────────────────────────┤
+│  📬 FOLLOW-UP STATUS                                        │
+│  Email 2 Pending:   ${String(followUpStats?.email2Pending || 0).padStart(5)}                               │
+│  Email 3 Pending:   ${String(followUpStats?.email3Pending || 0).padStart(5)}                               │
+│  Total Replies:     ${String(followUpStats?.totalReplies || 0).padStart(5)}                               │
+│  🎉 Interested:     ${String(followUpStats?.interestedReplies || 0).padStart(5)}                               │
 └─────────────────────────────────────────────────────────────┘
 `);
 
-    return { researched, emailsCreated, emailsSent, duration, errors };
+    return { discovered, researched, emailsCreated, emailsSent, duration, errors, followUpStats };
 }
 
 // ============================================================================
@@ -811,7 +919,8 @@ async function runResearchOnlyPipeline(limit: number): Promise<PipelineResult> {
 `);
 
     const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_ANON_KEY;
+    // Use service role key to bypass RLS - important for backend operations
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
 
     if (!supabaseUrl || !supabaseKey || !anthropicKey) {
@@ -853,7 +962,7 @@ async function runResearchOnlyPipeline(limit: number): Promise<PipelineResult> {
 └─────────────────────────────────────────────────────────────┘
 `);
 
-    return { researched, emailsCreated: 0, emailsSent: 0, duration, errors };
+    return { discovered: 0, researched, emailsCreated: 0, emailsSent: 0, duration, errors };
 }
 
 // ============================================================================
@@ -985,7 +1094,7 @@ Environment Variables:
   PIPELINE_SCHEDULE    Cron for full pipeline (default: "0 9 * * *" = 9 AM daily)
   RESEARCH_SCHEDULE    Cron for research-only run (default: "0 17 * * *" = 5 PM daily)
   PIPELINE_TIMEZONE    Timezone (default: "America/New_York")
-  PIPELINE_LIMIT       Max leads per stage (default: 10)
+  PIPELINE_LIMIT       Max leads to discover AND process per stage (default: 10)
   SLACK_WEBHOOK_URL    Slack webhook for notifications (REQUIRED for alerts!)
 
 Pipeline Schedules:

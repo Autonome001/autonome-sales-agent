@@ -609,7 +609,7 @@ async function pollRunStatus(
 async function getDatasetItems(
   datasetId: string,
   apiToken: string,
-  limit: number = 100
+  limit: number = 1000
 ): Promise<LeadsFinderResult[]> {
   try {
     const response = await fetch(
@@ -685,8 +685,8 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
 
     // Build actor input for pipelinelabs actor
     const actorInput: LeadsFinderInput = {
-      // Total results limit
-      totalResults: Math.min(params.maxResults || 25, 100),
+      // Total results limit - no cap, use PIPELINE_LIMIT directly
+      totalResults: params.maxResults || 25,
       // Require email addresses
       hasEmail: true,
       // Job titles - use free text field for custom titles
@@ -725,7 +725,7 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
     const items = await getDatasetItems(
       runResult.datasetId,
       apifyConfig.apiToken,
-      params.maxResults || 100
+      params.maxResults || 1000
     );
 
     // Transform to leads

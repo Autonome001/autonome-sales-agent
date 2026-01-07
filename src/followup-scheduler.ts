@@ -32,12 +32,13 @@ interface FollowUpConfig {
 function getConfig(): FollowUpConfig {
     return {
         supabaseUrl: process.env.SUPABASE_URL || '',
-        supabaseKey: process.env.SUPABASE_ANON_KEY || '',
+        // Use service role key to bypass RLS - important for backend operations
+        supabaseKey: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '',
         resendKey: process.env.RESEND_API_KEY,
         defaultSenderEmail: process.env.DEFAULT_SENDER_EMAIL || 'brian@autonome.us',
         defaultSenderName: process.env.DEFAULT_SENDER_NAME || 'Brian P.',
         email2DelayDays: parseInt(process.env.EMAIL_2_DELAY_DAYS || '3', 10),
-        email3DelayDays: parseInt(process.env.EMAIL_3_DELAY_DAYS || '7', 10),
+        email3DelayDays: parseInt(process.env.EMAIL_3_DELAY_DAYS || '5', 10),  // 5 days after Email 1
         slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
     };
 }
