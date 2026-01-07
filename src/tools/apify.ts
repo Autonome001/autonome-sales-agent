@@ -201,31 +201,86 @@ function mapSeniorities(seniorities?: string[]): string[] {
     .filter((v, i, a) => a.indexOf(v) === i);
 }
 
-// Parse location string to extract country and state
-// Input: "North Carolina, United States" or "United States" or "California"
-function parseLocation(location: string): { country?: string; state?: string } {
+// List of US states for validation
+const US_STATES = ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina', 'North Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania', 'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West Virginia', 'Wisconsin', 'Wyoming', 'District of Columbia'];
+
+// Common major US cities for detection (not exhaustive, but covers major metros)
+const US_CITIES = [
+  'New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix', 'Philadelphia', 'San Antonio', 'San Diego', 'Dallas', 'San Jose',
+  'Austin', 'Jacksonville', 'Fort Worth', 'Columbus', 'Charlotte', 'San Francisco', 'Indianapolis', 'Seattle', 'Denver', 'Boston',
+  'El Paso', 'Nashville', 'Detroit', 'Oklahoma City', 'Portland', 'Las Vegas', 'Memphis', 'Louisville', 'Baltimore', 'Milwaukee',
+  'Albuquerque', 'Tucson', 'Fresno', 'Sacramento', 'Mesa', 'Kansas City', 'Atlanta', 'Miami', 'Oakland', 'Minneapolis',
+  'Cleveland', 'Raleigh', 'Tampa', 'St. Louis', 'Pittsburgh', 'Cincinnati', 'Orlando', 'Salt Lake City', 'Honolulu', 'Omaha',
+  'New Orleans', 'Boise', 'Richmond', 'Buffalo', 'Rochester', 'Syracuse', 'Birmingham', 'Providence', 'Hartford', 'Madison'
+];
+
+// Parse location string to extract country, state, and city
+// Input: "Chicago", "North Carolina, United States", "San Francisco, California", "Sydney, Australia"
+function parseLocation(location: string): { country?: string; state?: string; city?: string } {
   const parts = location.split(',').map(p => p.trim());
 
-  // Check if it's a US state
-  const US_STATES = ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina', 'North Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania', 'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West Virginia', 'Wisconsin', 'Wyoming', 'District of Columbia'];
+  // Helper to check if a string is a US state
+  const isUSState = (str: string) => US_STATES.some(s => s.toLowerCase() === str.toLowerCase());
 
-  if (parts.length >= 2) {
-    // Format: "State, Country" or "City, State, Country"
-    const lastPart = parts[parts.length - 1];
-    const secondLastPart = parts[parts.length - 2];
+  // Helper to check if a string is a known US city
+  const isUSCity = (str: string) => US_CITIES.some(c => c.toLowerCase() === str.toLowerCase());
 
-    // Check if last part is a country
-    if (lastPart.toLowerCase().includes('united states') || lastPart.toLowerCase() === 'usa' || lastPart.toLowerCase() === 'us') {
-      return { country: 'United States', state: secondLastPart };
+  // Helper to check if it's a country indicator for USA
+  const isUSCountry = (str: string) => {
+    const lower = str.toLowerCase();
+    return lower.includes('united states') || lower === 'usa' || lower === 'us';
+  };
+
+  if (parts.length >= 3) {
+    // Format: "City, State, Country" - e.g., "San Francisco, California, United States"
+    const city = parts[0];
+    const state = parts[1];
+    const country = parts[2];
+
+    if (isUSCountry(country)) {
+      return { country: 'United States', state, city };
     }
-    return { country: lastPart, state: secondLastPart };
+    return { country, state, city };
   }
 
-  // Single part - check if it's a country or state
+  if (parts.length === 2) {
+    // Format: "State, Country" OR "City, State" - e.g., "California, United States" or "Chicago, Illinois"
+    const first = parts[0];
+    const second = parts[1];
+
+    // Check if second part is a country
+    if (isUSCountry(second)) {
+      // First part could be state or city
+      if (isUSState(first)) {
+        return { country: 'United States', state: first };
+      }
+      // Assume it's a city with implied state (less common format)
+      return { country: 'United States', city: first };
+    }
+
+    // Check if second part is a US state (e.g., "Chicago, Illinois")
+    if (isUSState(second)) {
+      return { country: 'United States', state: second, city: first };
+    }
+
+    // Otherwise, first is state/region, second is country
+    return { country: second, state: first };
+  }
+
+  // Single part - check if it's a country, state, or city
   const single = parts[0];
-  if (US_STATES.some(s => s.toLowerCase() === single.toLowerCase())) {
+
+  // First check if it's a known US city
+  if (isUSCity(single)) {
+    return { country: 'United States', city: single };
+  }
+
+  // Then check if it's a US state
+  if (isUSState(single)) {
     return { country: 'United States', state: single };
   }
+
+  // Otherwise assume it's a country
   return { country: single };
 }
 
@@ -499,10 +554,12 @@ async function runActorAndWait(
 
   console.log('🚀 Starting Apify Leads Finder...');
   console.log('   Actor:', actorId);
-  console.log('   Job Titles:', input.contact_job_title?.join(', ') || 'Any');
-  console.log('   Locations:', input.contact_location?.join(', ') || 'Any');
-  console.log('   Industries:', input.company_industry?.join(', ') || 'Any');
-  console.log('   Limit:', input.limit);
+  console.log('   Job Titles:', input.personTitleExtraIncludes?.join(', ') || 'Any');
+  console.log('   Countries:', input.personLocationCountryIncludes?.join(', ') || 'Any');
+  console.log('   States:', input.personLocationStateIncludes?.join(', ') || 'Any');
+  console.log('   Cities:', input.personLocationCityIncludes?.join(', ') || 'Any');
+  console.log('   Industries:', input.companyIndustryIncludes?.join(', ') || 'Any');
+  console.log('   Limit:', input.totalResults);
 
   try {
     // Start the actor run with waitForFinish
@@ -668,9 +725,10 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
   }
 
   try {
-    // Parse locations to extract countries and states
+    // Parse locations to extract countries, states, and cities
     const countries: string[] = [];
     const states: string[] = [];
+    const cities: string[] = [];
     if (params.locations?.length > 0) {
       for (const loc of params.locations) {
         const parsed = parseLocation(loc);
@@ -680,8 +738,16 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
         if (parsed.state && !states.includes(parsed.state)) {
           states.push(parsed.state);
         }
+        if (parsed.city && !cities.includes(parsed.city)) {
+          cities.push(parsed.city);
+        }
       }
     }
+
+    console.log('   📍 Location parsing:');
+    console.log('      Countries:', countries.length > 0 ? countries.join(', ') : 'None');
+    console.log('      States:', states.length > 0 ? states.join(', ') : 'None');
+    console.log('      Cities:', cities.length > 0 ? cities.join(', ') : 'None');
 
     // Build actor input for pipelinelabs actor
     const actorInput: LeadsFinderInput = {
@@ -694,9 +760,10 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
       includeSimilarTitles: true,
       // Seniority levels (mapped to Title Case)
       seniorityIncludes: mapSeniorities(params.seniorities),
-      // Person location filters
+      // Person location filters - use appropriate field for countries, states, AND cities
       personLocationCountryIncludes: countries.length > 0 ? countries : undefined,
       personLocationStateIncludes: states.length > 0 ? states : undefined,
+      personLocationCityIncludes: cities.length > 0 ? cities : undefined,
       // Company filters
       companyIndustryIncludes: mapIndustries(params.industries),
       companyEmployeeSizeIncludes: mapEmployeeRanges(params.employeeRanges),
