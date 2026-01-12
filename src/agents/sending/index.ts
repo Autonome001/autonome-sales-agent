@@ -39,7 +39,7 @@ export class SendingAgent {
             sendingWindowStart: config?.sendingWindowStart || 8,  // 8am
             sendingWindowEnd: config?.sendingWindowEnd || 18,     // 6pm
             dailyLimit: config?.dailyLimit || 100,
-            delayBetweenEmails: config?.delayBetweenEmails || 500, // 0.5 seconds
+            delayBetweenEmails: config?.delayBetweenEmails || 600, // 0.6 seconds - respects Resend's 2 req/sec limit
         };
 
         if (this.config.resendApiKey) {

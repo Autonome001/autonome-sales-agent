@@ -19,7 +19,7 @@ const defaultConfig: PipelineConfig = {
     sendingLimit: 10,
     delayBetweenLeads: 500,       // 0.5 seconds (was 1 second)
     delayBetweenStages: 1000,     // 1 second (was 5 seconds)
-    delayBetweenEmails: 5000,     // 5 seconds (was 60 seconds) - for testing
+    delayBetweenEmails: 600,      // 0.6 seconds - respects Resend's 2 req/sec limit (was 5 seconds)
 };
 
 // Fast mode for testing
@@ -29,7 +29,7 @@ const fastConfig: PipelineConfig = {
     sendingLimit: 10,
     delayBetweenLeads: 100,       // 0.1 seconds
     delayBetweenStages: 500,      // 0.5 seconds
-    delayBetweenEmails: 1000,     // 1 second
+    delayBetweenEmails: 600,      // 0.6 seconds - MUST respect Resend's 2 req/sec limit
 };
 
 async function runPipeline(config: Partial<PipelineConfig> = {}) {

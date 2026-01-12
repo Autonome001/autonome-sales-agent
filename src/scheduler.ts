@@ -544,14 +544,16 @@ async function runResearchStage(supabase: SupabaseClient, anthropic: Anthropic, 
 
 async function generateEmails(anthropic: Anthropic, lead: Lead, sender: Sender): Promise<{ subject1: string; body1: string; body2: string; subject3: string; body3: string }> {
     // Extract research insights from the research_data JSONB field
-    const researchData = lead.research_data as { analysis?: {
-        personalProfile?: string;
-        companyProfile?: string;
-        painPoints?: Array<{ pain: string; evidence: string; solution: string }>;
-        personalizationOpportunities?: Array<{ type: string; hook: string; evidence: string }>;
-        uniqueFacts?: string[];
-        interests?: string[];
-    }} | null;
+    const researchData = lead.research_data as {
+        analysis?: {
+            personalProfile?: string;
+            companyProfile?: string;
+            painPoints?: Array<{ pain: string; evidence: string; solution: string }>;
+            personalizationOpportunities?: Array<{ type: string; hook: string; evidence: string }>;
+            uniqueFacts?: string[];
+            interests?: string[];
+        }
+    } | null;
 
     const analysis = researchData?.analysis;
     const personalProfile = analysis?.personalProfile || '';
@@ -789,6 +791,10 @@ async function runSendingStage(supabase: SupabaseClient, limit: number): Promise
         } else {
             console.log(`   ❌ Failed: ${result.error}`);
         }
+
+        // Rate limiting: Resend allows 2 requests/second, so wait 600ms between emails
+        // This ensures we stay safely under the limit (500ms = exactly 2/sec, 600ms = safety margin)
+        await new Promise(resolve => setTimeout(resolve, 600));
     }
 
     console.log(`\n🏁 Stage 3 Complete: ${sent} emails sent`);
