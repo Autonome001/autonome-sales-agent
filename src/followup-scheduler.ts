@@ -247,7 +247,13 @@ async function updateLead(supabase: SupabaseClient, id: string, updates: any): P
 // Email Sending
 // ============================================================================
 
-async function sendEmail(config: FollowUpConfig, to: string, subject: string, body: string): Promise<{ success: boolean; error?: string }> {
+async function sendEmail(
+    config: FollowUpConfig,
+    to: string,
+    subject: string,
+    body: string,
+    retries = 2
+): Promise<{ success: boolean; error?: string }> {
     if (!config.resendKey) {
         return { success: false, error: 'RESEND_API_KEY not configured' };
     }
@@ -269,6 +275,13 @@ async function sendEmail(config: FollowUpConfig, to: string, subject: string, bo
 
         const data = await response.json();
         if (!response.ok) {
+            // Handle rate limiting with exponential backoff
+            if (response.status === 429 && retries > 0) {
+                const waitTime = 1000 * (3 - retries); // 1s, 2s backoff
+                log('WARN', `Rate limited, retrying in ${waitTime}ms... (${retries} retries left)`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                return sendEmail(config, to, subject, body, retries - 1);
+            }
             // Ensure error is always a string
             const errorMsg = typeof data.message === 'string'
                 ? data.message
@@ -310,6 +323,10 @@ async function processEmail2Followups(supabase: SupabaseClient, config: FollowUp
             log('ERROR', `Failed: ${result.error}`);
             errors.push(`${lead.email}: ${result.error}`);
         }
+
+        // Rate limiting: Resend allows 2 requests/second, so wait 600ms between emails
+        // This ensures we stay safely under the limit (500ms = exactly 2/sec, 600ms = safety margin)
+        await new Promise(resolve => setTimeout(resolve, 600));
     }
 
     return { sent, errors };
@@ -339,6 +356,10 @@ async function processEmail3Followups(supabase: SupabaseClient, config: FollowUp
             log('ERROR', `Failed: ${result.error}`);
             errors.push(`${lead.email}: ${result.error}`);
         }
+
+        // Rate limiting: Resend allows 2 requests/second, so wait 600ms between emails
+        // This ensures we stay safely under the limit (500ms = exactly 2/sec, 600ms = safety margin)
+        await new Promise(resolve => setTimeout(resolve, 600));
     }
 
     return { sent, errors };
@@ -427,6 +448,13 @@ async function runFollowups(): Promise<FollowUpResult | null> {
         const email2Result = await processEmail2Followups(supabase, config);
         result.email2Sent = email2Result.sent;
         result.errors.push(...email2Result.errors);
+
+        // CRITICAL: Add delay between Email 2 and Email 3 batches
+        // This prevents the last Email 2 and first Email 3 from hitting rate limits
+        if (email2Result.sent > 0) {
+            log('INFO', 'Waiting 600ms before Email 3 batch to respect rate limits...');
+            await new Promise(resolve => setTimeout(resolve, 600));
+        }
 
         const email3Result = await processEmail3Followups(supabase, config);
         result.email3Sent = email3Result.sent;
