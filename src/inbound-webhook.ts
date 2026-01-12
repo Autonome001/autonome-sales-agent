@@ -29,6 +29,7 @@ app.use(express.json({ verify: rawBodySaver }));
 app.use(express.urlencoded({ extended: true, verify: rawBodySaver }));
 
 import { handleSlackCommand, handleSlackEvent, verifySlackRequest } from './slack/handler.js';
+import { handleGoogleCalendarWebhook, handleCalendlyWebhook } from './webhooks/calendly.js';
 
 // ============================================================================
 // Configuration
@@ -319,6 +320,16 @@ app.post('/slack/command', verifySlackMiddleware, handleSlackCommand);
 // Events endpoint (for thread replies / continuous conversation)
 app.post('/slack/events', verifySlackMiddleware, handleSlackEvent);
 
+// ============================================================================
+// Calendar Booking Webhooks (Tavus Video Generation)
+// ============================================================================
+
+// Google Calendar webhook (primary)
+app.post('/webhook/google-calendar', handleGoogleCalendarWebhook);
+
+// Legacy Calendly webhook (backwards compatibility)
+app.post('/webhook/calendly', handleCalendlyWebhook);
+
 
 // ============================================================================
 // Webhook Endpoint
@@ -398,12 +409,13 @@ if (isMainModule) {
 Server running on port ${PORT}
 
 Endpoints:
-  Slack Command:    http://localhost:${PORT}/slack/command
-  Slack Events:     http://localhost:${PORT}/slack/events
-  Inbound Email:    http://localhost:${PORT}/webhook/inbound-email
-  Health Check:     http://localhost:${PORT}/health
+  Slack Command:      http://localhost:${PORT}/slack/command
+  Slack Events:       http://localhost:${PORT}/slack/events
+  Google Calendar:    http://localhost:${PORT}/webhook/google-calendar
+  Inbound Email:      http://localhost:${PORT}/webhook/inbound-email
+  Health Check:       http://localhost:${PORT}/health
 
-Ready for Slack conversations and inbound emails...
+Ready for Slack conversations, calendar bookings, and inbound emails...
 `);
     });
 }

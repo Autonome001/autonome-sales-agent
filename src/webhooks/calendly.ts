@@ -2,14 +2,233 @@ import type { Request, Response } from 'express';
 import { leadsDb } from '../db/index.js';
 import { tavusService } from '../services/tavus.js';
 
+const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
+
 /**
- * Handle Calendly Webhook
- * Trigger: invitee.created
+ * Send Slack notification when Tavus is unavailable
+ */
+async function notifyTavusUnavailable(
+    leadName: string,
+    leadEmail: string,
+    reason: string
+): Promise<void> {
+    if (!SLACK_WEBHOOK_URL) {
+        console.warn('   ⚠️ Slack webhook not configured, cannot notify about Tavus unavailability');
+        return;
+    }
+
+    const message = {
+        blocks: [
+            {
+                type: 'header',
+                text: {
+                    type: 'plain_text',
+                    text: '⚠️ AI Consulting Agent Unavailable',
+                    emoji: true,
+                },
+            },
+            {
+                type: 'section',
+                fields: [
+                    { type: 'mrkdwn', text: `*Lead:*\n${leadName}` },
+                    { type: 'mrkdwn', text: `*Email:*\n${leadEmail}` },
+                ],
+            },
+            {
+                type: 'section',
+                text: {
+                    type: 'mrkdwn',
+                    text: `*Reason:*\n${reason}\n\n*Action Required:* The meeting has been booked, but no personalized AI video was generated. Consider reaching out manually before the call.`,
+                },
+            },
+            {
+                type: 'context',
+                elements: [
+                    {
+                        type: 'mrkdwn',
+                        text: `📅 ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET`,
+                    },
+                ],
+            },
+        ],
+    };
+
+    try {
+        const response = await fetch(SLACK_WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(message),
+        });
+        if (response.ok) {
+            console.log('   ✅ Slack notification sent about Tavus unavailability');
+        } else {
+            console.error('   ❌ Failed to send Slack notification:', await response.text());
+        }
+    } catch (error) {
+        console.error('   ❌ Error sending Slack notification:', error);
+    }
+}
+
+/**
+ * Handle Google Calendar Webhook
+ * Trigger: calendar.events.created or appointment scheduled
+ * 
+ * Google Calendar webhook payloads vary based on setup:
+ * - Google Calendar Push Notifications (Pub/Sub)
+ * - Google Calendar API subscriptions
+ * - Google Appointment Scheduling webhooks
+ */
+export async function handleGoogleCalendarWebhook(req: Request, res: Response) {
+    console.log('📅 Google Calendar webhook received');
+
+    try {
+        const event = req.body;
+
+        // Handle different Google Calendar event structures
+        // Google Calendar push notification sync token
+        if (event['X-Goog-Channel-Token'] || event['X-Goog-Resource-State']) {
+            console.log('   📌 Received Google Calendar push notification');
+            // This is a sync notification, acknowledge it
+            if (event['X-Goog-Resource-State'] === 'sync') {
+                return res.status(200).send('Sync acknowledged');
+            }
+        }
+
+        // Try to extract attendee info from various Google Calendar formats
+        let email: string | undefined;
+        let name: string | undefined;
+        let eventTitle: string | undefined;
+
+        // Google Appointment Scheduling format
+        if (event.attendees && Array.isArray(event.attendees)) {
+            const externalAttendee = event.attendees.find((a: any) => !a.organizer && !a.self);
+            if (externalAttendee) {
+                email = externalAttendee.email;
+                name = externalAttendee.displayName || externalAttendee.email.split('@')[0];
+            }
+        }
+
+        // Alternative: wrapped in resource object
+        if (!email && event.resource?.attendees) {
+            const externalAttendee = event.resource.attendees.find((a: any) => !a.organizer && !a.self);
+            if (externalAttendee) {
+                email = externalAttendee.email;
+                name = externalAttendee.displayName || externalAttendee.email.split('@')[0];
+            }
+        }
+
+        // Alternative: email passed directly in payload
+        if (!email && event.email) {
+            email = event.email;
+            name = event.name || event.email.split('@')[0];
+        }
+
+        // Get event title/summary
+        eventTitle = event.summary || event.resource?.summary || 'Consultation Call';
+
+        if (!email) {
+            console.log('   ⚠️ No attendee email found in webhook payload');
+            console.log('   Payload:', JSON.stringify(event, null, 2));
+            return res.status(200).send('No attendee email found');
+        }
+
+        console.log(`   👤 Attendee: ${name} (${email})`);
+        console.log(`   📋 Event: ${eventTitle}`);
+
+        // 1. Find or acknowledge lead
+        let lead = await leadsDb.findByEmail(email);
+        let firstName = name?.split(' ')[0] || 'there';
+        let companyName = 'your company';
+
+        if (lead) {
+            firstName = lead.first_name || firstName;
+            companyName = lead.company_name || companyName;
+            console.log(`   ✅ Found lead in database: ${lead.first_name} ${lead.last_name}`);
+        } else {
+            console.log('   ℹ️ Lead not in database (new booking from website)');
+        }
+
+        // 2. Attempt Tavus Video Generation with graceful fallback
+        const REPLICA_ID = process.env.TAVUS_REPLICA_ID;
+        const TAVUS_API_KEY = process.env.TAVUS_API_KEY;
+
+        if (!REPLICA_ID || !TAVUS_API_KEY) {
+            console.warn('   ⚠️ Tavus not configured (missing REPLICA_ID or API_KEY)');
+            await notifyTavusUnavailable(
+                name || 'Unknown',
+                email,
+                'Tavus credentials not configured (TAVUS_REPLICA_ID or TAVUS_API_KEY missing)'
+            );
+            return res.status(200).json({
+                success: true,
+                message: 'Booking processed, Tavus not configured',
+                tavusVideo: false
+            });
+        }
+
+        try {
+            console.log('   🎥 Triggering Tavus video generation...');
+            const video = await tavusService.generateVideo({
+                replicaId: REPLICA_ID,
+                script: `Hi ${firstName}, looking forward to our call about helping ${companyName} with automation and AI. See you soon!`,
+                videoName: `pre-call-${lead?.id || Date.now()}`,
+                variables: {
+                    name: firstName,
+                    company: companyName
+                }
+            });
+
+            console.log(`   ✅ Video queued: ${video.video_id}`);
+
+            // Update lead with video info if we have one
+            if (lead) {
+                await leadsDb.update(lead.id, {
+                    meeting_scheduled_at: new Date().toISOString(),
+                    // Store video ID if you have a column for it
+                });
+            }
+
+            res.status(200).json({
+                success: true,
+                videoId: video.video_id,
+                tavusVideo: true
+            });
+
+        } catch (tavusError) {
+            // Graceful fallback: booking still successful, just no video
+            const errorMessage = tavusError instanceof Error ? tavusError.message : String(tavusError);
+            console.error(`   ❌ Tavus video generation failed: ${errorMessage}`);
+
+            // Notify via Slack that AI agent is unavailable
+            await notifyTavusUnavailable(
+                name || 'Unknown',
+                email,
+                `Tavus API error: ${errorMessage}`
+            );
+
+            // Still return success - the meeting is booked, just no video
+            res.status(200).json({
+                success: true,
+                message: 'Booking processed, video generation failed',
+                tavusVideo: false,
+                error: errorMessage
+            });
+        }
+
+    } catch (error) {
+        console.error('❌ Google Calendar webhook failed:', error);
+        res.status(500).send(error instanceof Error ? error.message : 'Unknown error');
+    }
+}
+
+/**
+ * Legacy Calendly webhook handler (keeping for backwards compatibility)
+ * @deprecated Use handleGoogleCalendarWebhook instead
  */
 export async function handleCalendlyWebhook(req: Request, res: Response) {
-    console.log('📅 Calendly webhook received');
+    console.log('📅 Calendly webhook received (legacy)');
+    console.warn('   ⚠️ Consider switching to Google Calendar webhook');
 
-    // 1. Validate (simulated, ideally check signature)
     const event = req.body;
     if (event.event !== 'invitee.created') {
         return res.status(200).send('Ignored event type');
@@ -17,52 +236,14 @@ export async function handleCalendlyWebhook(req: Request, res: Response) {
 
     const payload = event.payload;
     const email = payload.email;
-    const name = payload.name; // "First Last"
+    const name = payload.name;
 
-    console.log(`   👤 Invitee: ${name} (${email})`);
+    // Forward to new handler with normalized structure
+    req.body = {
+        email,
+        name,
+        summary: 'Consultation Call (via Calendly)'
+    };
 
-    try {
-        // 2. Find or Create Lead
-        let lead = await leadsDb.findByEmail(email);
-        if (!lead) {
-            console.log('   ⚠️ Lead not in DB, skipping video gen for now (or create new)');
-            // Create logic could go here
-            return res.status(200).send('Lead not found');
-        }
-
-        // 3. Trigger Tavus Video Generation
-        // Only if we want to send a pre-meeting video
-        const REPLICA_ID = process.env.TAVUS_REPLICA_ID;
-        if (!REPLICA_ID) {
-            console.warn('   ⚠️ TAVUS_REPLICA_ID not configured');
-            return res.status(200).send('Tavus not configured');
-        }
-
-        const firstName = lead.first_name || name.split(' ')[0];
-
-        console.log('   🎥 Triggering Tavus video generation...');
-        const video = await tavusService.generateVideo({
-            replicaId: REPLICA_ID,
-            script: `Hi ${firstName}, looking forward to our call about helping ${lead.company_name || 'your company'} automate sales. See you soon!`,
-            videoName: `pre-call-${lead.id}`,
-            variables: {
-                name: firstName,
-                company: lead.company_name || 'your company'
-            }
-        });
-
-        // 4. Store Video Pending Status
-        await leadsDb.update(lead.id, {
-            // we might need a metadata field or new column
-            // for now just log it
-        });
-
-        console.log(`   ✅ Video queued: ${video.video_id}`);
-
-        res.status(200).json({ success: true, videoId: video.video_id });
-
-    } catch (error) {
-        console.error('❌ Calendly webhook failed:', error);
-        res.status(500).send(error instanceof Error ? error.message : 'Unknown error');
-    }
+    return handleGoogleCalendarWebhook(req, res);
 }
