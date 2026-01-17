@@ -538,13 +538,25 @@ Environment Variables:
 }
 
 // Global error handler with notification
-main().catch(async (error) => {
-    const config = getConfig();
-    logger.error('Follow-up scheduler crashed', { metadata: error });
-    await sendCriticalFailureNotification(
-        error instanceof Error ? error : new Error(String(error)),
-        'Scheduler Startup',
-        config
-    );
-    process.exit(1);
-});
+import { fileURLToPath } from 'url';
+import path from 'path';
+
+const isMainModule = () => {
+    if (!process.argv[1]) return false;
+    const entryFile = process.argv[1];
+    const currentFile = fileURLToPath(import.meta.url);
+    return entryFile === currentFile || path.relative(entryFile, currentFile) === '';
+};
+
+if (isMainModule()) {
+    main().catch(async (error) => {
+        const config = getConfig();
+        logger.error('Follow-up scheduler crashed', { metadata: error });
+        await sendCriticalFailureNotification(
+            error instanceof Error ? error : new Error(String(error)),
+            'Scheduler Startup',
+            config
+        );
+        process.exit(1);
+    });
+}

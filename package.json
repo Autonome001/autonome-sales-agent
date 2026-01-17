@@ -28,9 +28,9 @@
     "inbound:server": "tsx src/inbound-webhook.ts",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
-    "start:scheduler": "tsx src/scheduler.ts",
-    "start:followups": "tsx src/followup-scheduler.ts --watch",
-    "start:webhook": "tsx src/inbound-webhook.ts"
+    "start:scheduler": "node dist/scheduler.js",
+    "start:followups": "node dist/followup-scheduler.js --watch",
+    "start:webhook": "node dist/inbound-webhook.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
@@ -38,6 +38,7 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "node-cron": "^4.2.1",
+    "resend": "^4.0.1",
     "winston": "^3.19.0",
     "zod": "^3.24.1"
   },
