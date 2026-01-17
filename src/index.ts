@@ -7,6 +7,7 @@
 
 import { app } from './inbound-webhook.js';
 import { startScheduler, getSchedulerConfig } from './scheduler.js';
+import { startFollowupScheduler } from './followup-scheduler.js';
 import { logger, logSuccess } from './utils/logger.js';
 import { config as loadEnv } from 'dotenv';
 loadEnv();
@@ -18,8 +19,9 @@ async function start() {
 ╔═══════════════════════════════════════════════════════════════╗
 ║          🚀 AUTONOME AGENT SYSTEM STARTING                    ║
 ║                                                               ║
-║  1. Inbound Webhook Server (Port ${PORT})                       ║
-║  2. Sales Pipeline Scheduler (Cron)                           ║
+║  1. Inbound Webhook Server (Port ${PORT})                       
+║  2. Sales Pipeline Scheduler (Cron)                           
+║  3. Follow-up Email Watcher (Cron)                            
 ╚═══════════════════════════════════════════════════════════════╝
 `);
 
@@ -31,6 +33,9 @@ async function start() {
   // 2. Start Scheduler
   const schedulerConfig = getSchedulerConfig();
   startScheduler(schedulerConfig);
+
+  // 3. Start Follow-up Watcher
+  startFollowupScheduler();
 
   logger.info('System fully operational');
 }

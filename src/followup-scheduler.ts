@@ -434,7 +434,7 @@ async function runFollowups(): Promise<FollowUpResult | null> {
 // Watch Mode
 // ============================================================================
 
-function startWatchMode(): void {
+export function startFollowupScheduler(): void {
     const config = getConfig();
     logger.info('👀 Starting follow-up watcher (runs every hour)');
 
@@ -476,7 +476,7 @@ function startWatchMode(): void {
         }
     });
 
-    logger.info('Watcher started. Press Ctrl+C to stop.');
+    logger.info('Follow-up Watcher started');
 }
 
 // ============================================================================
@@ -501,7 +501,7 @@ async function main(): Promise<void> {
     }
 
     if (args.includes('--watch') || args.includes('-w')) {
-        startWatchMode();
+        startFollowupScheduler();
     } else if (args.includes('--help') || args.includes('-h')) {
         console.log(`
 Usage: npx tsx src/followup-scheduler.ts [options]
