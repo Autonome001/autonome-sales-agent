@@ -38,9 +38,21 @@ export interface Database {
           email_3_sent_at: string | null;
           replied_at: string | null;
           meeting_booked_at: string | null;
+          meeting_scheduled_at: string | null;
+          meeting_link: string | null;
+          meeting_outcome: string | null;
+          reply_category: string | null;
+          reply_sentiment: string | null;
+          email_1_message_id: string | null;
+          email_2_message_id: string | null;
+          email_3_message_id: string | null;
           source: string | null;
           created_at: string;
           updated_at: string;
+          // Error Tracking
+          error_reason: string | null;
+          error_count: number;
+          last_error_at: string | null;
         };
         Insert: Omit<Database['public']['Tables']['leads']['Row'], 'id' | 'created_at' | 'updated_at' | 'opt_out_token'> & {
           id?: string;

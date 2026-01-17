@@ -3,6 +3,8 @@ import { ResearchAgent } from './agents/research/index.js';
 import { OutreachAgent } from './agents/outreach/index.js';
 import { SendingAgent } from './agents/sending/index.js';
 import { leadsDb, checkConnection } from './db/index.js';
+import { logger, logSuccess } from './utils/logger.js';
+import { metrics } from './utils/metrics.js';
 
 interface PipelineConfig {
     researchLimit: number;
@@ -14,9 +16,9 @@ interface PipelineConfig {
 }
 
 const defaultConfig: PipelineConfig = {
-    researchLimit: 10,
-    outreachLimit: 10,
-    sendingLimit: 10,
+    researchLimit: 300,           // 300 leads per batch (saved in 2× 150-lead chunks = 900/day)
+    outreachLimit: 300,
+    sendingLimit: 300,
     delayBetweenLeads: 500,       // 0.5 seconds (was 1 second)
     delayBetweenStages: 1000,     // 1 second (was 5 seconds)
     delayBetweenEmails: 600,      // 0.6 seconds - respects Resend's 2 req/sec limit (was 5 seconds)
@@ -24,9 +26,9 @@ const defaultConfig: PipelineConfig = {
 
 // Fast mode for testing
 const fastConfig: PipelineConfig = {
-    researchLimit: 10,
-    outreachLimit: 10,
-    sendingLimit: 10,
+    researchLimit: 100,
+    outreachLimit: 100,
+    sendingLimit: 100,
     delayBetweenLeads: 100,       // 0.1 seconds
     delayBetweenStages: 500,      // 0.5 seconds
     delayBetweenEmails: 600,      // 0.6 seconds - MUST respect Resend's 2 req/sec limit
@@ -43,10 +45,10 @@ async function runPipeline(config: Partial<PipelineConfig> = {}) {
     // Check database connection
     const dbConnected = await checkConnection();
     if (!dbConnected) {
-        console.log('❌ Database not connected. Aborting pipeline.\n');
+        logger.error('Database not connected. Aborting pipeline.');
         process.exit(1);
     }
-    console.log('✅ Database connected\n');
+    logSuccess('Database connected');
 
     const startTime = Date.now();
     const stats = {
@@ -61,102 +63,98 @@ async function runPipeline(config: Partial<PipelineConfig> = {}) {
     const sendingAgent = new SendingAgent();
 
     try {
-        // ═══════════════════════════════════════════════════════════════
         // STAGE 1: RESEARCH
         // ═══════════════════════════════════════════════════════════════
-        console.log('┌─────────────────────────────────────────────────────────────┐');
-        console.log('│ STAGE 1: RESEARCH                                          │');
-        console.log('└─────────────────────────────────────────────────────────────┘\n');
+        logger.info('STAGE 1: RESEARCH');
 
         const scrapedLeads = await leadsDb.findByStatus('scraped', cfg.researchLimit);
-        console.log(`📋 Found ${scrapedLeads.length} leads to research\n`);
+        logger.info(`Found ${scrapedLeads.length} leads to research`);
 
         for (const lead of scrapedLeads) {
-            console.log(`🔬 Researching: ${lead.first_name} ${lead.last_name} (${lead.email})`);
+            logger.info(`Researching: ${lead.first_name} ${lead.last_name} (${lead.email})`);
             const result = await researchAgent.researchLead(lead);
             if (result.success) {
                 stats.researched++;
-                console.log(`   ✅ Research complete\n`);
+                metrics.increment('leadsResearched');
+                logSuccess(`Research complete for: ${lead.email}`);
             } else {
-                console.log(`   ❌ Research failed: ${result.error}\n`);
+                logger.error(`Research failed for: ${lead.email}`, { metadata: { error: result.error } });
+                metrics.increment('errorsCaught');
             }
             await delay(cfg.delayBetweenLeads);
         }
 
-        console.log(`\n📊 Stage 1 Complete: ${stats.researched} leads researched\n`);
+        logSuccess(`Stage 1 Complete: ${stats.researched} leads researched`);
         await delay(cfg.delayBetweenStages);
 
-        // ═══════════════════════════════════════════════════════════════
         // STAGE 2: OUTREACH (Email Generation)
         // ═══════════════════════════════════════════════════════════════
-        console.log('┌─────────────────────────────────────────────────────────────┐');
-        console.log('│ STAGE 2: OUTREACH (Email Generation)                       │');
-        console.log('└─────────────────────────────────────────────────────────────┘\n');
+        logger.info('STAGE 2: OUTREACH (Email Generation)');
 
         const researchedLeads = await leadsDb.findByStatus('researched', cfg.outreachLimit);
-        console.log(`📋 Found ${researchedLeads.length} leads for email generation\n`);
+        logger.info(`Found ${researchedLeads.length} leads for email generation`);
 
         for (const lead of researchedLeads) {
-            console.log(`📧 Generating emails for: ${lead.first_name} ${lead.last_name}`);
+            logger.info(`Generating emails for: ${lead.first_name} ${lead.last_name}`);
             const result = await outreachAgent.generateEmailSequence(lead);
             if (result.success) {
                 stats.emailsGenerated++;
-                console.log(`   ✅ Emails generated\n`);
+                metrics.increment('emailsGenerated');
+                logSuccess(`Emails generated for: ${lead.email}`);
             } else {
-                console.log(`   ❌ Generation failed: ${result.error}\n`);
+                logger.error(`Generation failed for: ${lead.email}`, { metadata: { error: result.error } });
+                metrics.increment('errorsCaught');
             }
             await delay(cfg.delayBetweenLeads);
         }
 
-        console.log(`\n📊 Stage 2 Complete: ${stats.emailsGenerated} email sequences generated\n`);
+        logSuccess(`Stage 2 Complete: ${stats.emailsGenerated} email sequences generated`);
         await delay(cfg.delayBetweenStages);
 
-        // ═══════════════════════════════════════════════════════════════
         // STAGE 3: SENDING (Email 1)
         // ═══════════════════════════════════════════════════════════════
-        console.log('┌─────────────────────────────────────────────────────────────┐');
-        console.log('│ STAGE 3: SENDING (Email 1)                                 │');
-        console.log('└─────────────────────────────────────────────────────────────┘\n');
+        logger.info('STAGE 3: SENDING (Email 1)');
 
         const readyLeads = await leadsDb.findByStatus('ready', cfg.sendingLimit);
-        console.log(`📋 Found ${readyLeads.length} leads ready to send\n`);
+        logger.info(`Found ${readyLeads.length} leads ready to send`);
 
         if (!process.env.RESEND_API_KEY && !process.env.INSTANTLY_API_KEY) {
-            console.log('⚠️  No email API configured (RESEND_API_KEY or INSTANTLY_API_KEY) - skipping sending\n');
+            logger.warn('No email API configured (RESEND_API_KEY or INSTANTLY_API_KEY) - skipping sending');
         } else {
             for (const lead of readyLeads) {
-                console.log(`📤 Sending Email 1 to: ${lead.email}`);
+                logger.info(`Sending Email 1 to: ${lead.email}`);
                 const result = await sendingAgent.sendEmail1(lead.id);
                 if (result.success) {
                     stats.emailsSent++;
-                    console.log(`   ✅ Sent\n`);
+                    metrics.increment('emailsSent');
+                    logSuccess(`Sent Email 1 to: ${lead.email}`);
                 } else {
-                    console.log(`   ❌ Failed: ${result.error}\n`);
+                    logger.error(`Failed to send to: ${lead.email}`, { metadata: { error: result.error } });
+                    metrics.increment('errorsCaught');
                 }
                 await delay(cfg.delayBetweenEmails);
             }
         }
 
-        console.log(`\n📊 Stage 3 Complete: ${stats.emailsSent} emails sent\n`);
+        logSuccess(`Stage 3 Complete: ${stats.emailsSent} emails sent`);
 
-        // ═══════════════════════════════════════════════════════════════
-        // PIPELINE COMPLETE
-        // ═══════════════════════════════════════════════════════════════
-        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+        // Fetch quarantine and error stats
+        let quarantineCount = 0;
+        let leadsWithErrors = 0;
+        try {
+            quarantineCount = await leadsDb.countQuarantined();
+            const leadsWithErrorList = await leadsDb.findWithErrors(100);
+            leadsWithErrors = leadsWithErrorList.length;
+            metrics.set('quarantinedLeads', quarantineCount);
+        } catch (e) {
+            logger.warn('Failed to fetch quarantine/error stats', { metadata: e });
+        }
 
-        console.log('╔═══════════════════════════════════════════════════════════════╗');
-        console.log('║                    📊 PIPELINE SUMMARY                        ║');
-        console.log('╠═══════════════════════════════════════════════════════════════╣');
-        console.log(`║  🔬 Leads Researched:        ${String(stats.researched).padStart(4)}                           ║`);
-        console.log(`║  📧 Email Sequences Created: ${String(stats.emailsGenerated).padStart(4)}                           ║`);
-        console.log(`║  📤 Emails Sent:             ${String(stats.emailsSent).padStart(4)}                           ║`);
-        console.log(`║  ⏱️  Duration:               ${duration.padStart(5)}s                          ║`);
-        console.log('╚═══════════════════════════════════════════════════════════════╝\n');
-
-        console.log(`📝 Pipeline complete: ${stats.researched} researched, ${stats.emailsGenerated} emails created, ${stats.emailsSent} sent in ${duration}s\n`);
-
+        const durationSeconds = (Date.now() - startTime) / 1000;
+        logSuccess('PIPELINE COMPLETE', { metadata: { ...stats, quarantineCount, leadsWithErrors, duration: durationSeconds } });
     } catch (error) {
-        console.error('\n❌ Pipeline error:', error);
+        logger.error('Pipeline error', { metadata: error });
+        metrics.increment('errorsCaught');
         process.exit(1);
     }
 }
@@ -172,7 +170,7 @@ let config: Partial<PipelineConfig> = {};
 // Check for --fast flag
 if (args.includes('--fast')) {
     config = { ...fastConfig };
-    console.log('⚡ Running in FAST mode\n');
+    logger.info('⚡ Running in FAST mode');
 }
 
 for (let i = 0; i < args.length; i += 2) {

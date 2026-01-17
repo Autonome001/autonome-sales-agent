@@ -1,4 +1,5 @@
 import { apifyConfig } from '../config/index.js';
+import { logger } from '../utils/logger.js';
 
 // Multiple actor options for Google Search - try in order
 // All use pay-per-event pricing (~$0.002 per search)
@@ -19,7 +20,7 @@ export interface SearchResult {
 }
 
 export async function googleSearch(query: string, maxResults: number = 3): Promise<SearchResult[]> {
-    console.log(`🔍 Searching Google for: "${query}"`);
+    logger.info(`Searching Google for: "${query}"`);
 
     // Try each actor until one works
     for (const actorId of GOOGLE_SEARCH_ACTORS) {
@@ -29,7 +30,7 @@ export async function googleSearch(query: string, maxResults: number = 3): Promi
                 return results;
             }
         } catch (error) {
-            console.log(`   ⚠️ Actor ${actorId} failed, trying next...`);
+            logger.warn(`Actor ${actorId} failed, trying next...`, { metadata: error });
         }
     }
 
@@ -116,7 +117,7 @@ async function tryGoogleSearchActor(actorId: string, query: string, maxResults: 
     }
 
     if (results.length > 0) {
-        console.log(`   ✅ Found ${results.length} results via ${actorId}`);
+        logger.info(`Found ${results.length} results via ${actorId}`);
     }
 
     return results.slice(0, maxResults);

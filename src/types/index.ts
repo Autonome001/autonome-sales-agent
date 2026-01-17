@@ -21,57 +21,76 @@ export type LeadStatus = z.infer<typeof LeadStatus>;
 // Core Lead schema
 export const LeadSchema = z.object({
   id: z.string().uuid(),
-  
+
   // Identity
   first_name: z.string().nullable(),
   last_name: z.string().nullable(),
   email: z.string().email(),
   phone: z.string().nullable(),
   linkedin_url: z.string().url().nullable(),
-  
+
   // Professional
   company_name: z.string().nullable(),
   job_title: z.string().nullable(),
   seniority: z.string().nullable(),
   industry: z.string().nullable(),
   website_url: z.string().nullable(),
-  
+
   // Location
   city: z.string().nullable(),
   state: z.string().nullable(),
   country: z.string().nullable(),
   timezone: z.string().nullable(),
-  
+
   // State
   status: LeadStatus,
-  
+
   // Research (stored as JSONB)
   research_data: z.record(z.any()).nullable(),
   research_completed_at: z.string().datetime().nullable(),
-  
+
   // Email content
   email_1_subject: z.string().nullable(),
   email_1_body: z.string().nullable(),
   email_2_body: z.string().nullable(),
   email_3_subject: z.string().nullable(),
   email_3_body: z.string().nullable(),
-  
+
   // Sending
   sender_email: z.string().email().nullable(),
   opt_out_token: z.string(),
   gmail_thread_id: z.string().nullable(),
-  
+
   // Timestamps
   email_1_sent_at: z.string().datetime().nullable(),
   email_2_sent_at: z.string().datetime().nullable(),
   email_3_sent_at: z.string().datetime().nullable(),
   replied_at: z.string().datetime().nullable(),
   meeting_booked_at: z.string().datetime().nullable(),
-  
+  meeting_scheduled_at: z.string().datetime().nullable(),
+
+  // Booking & Meeting
+  meeting_link: z.string().nullable(),
+  meeting_outcome: z.string().nullable(),
+
+  // Response Tracking
+  reply_category: z.string().nullable(),
+  reply_sentiment: z.string().nullable(),
+
+  // Message IDs for thread tracking
+  email_1_message_id: z.string().nullable(),
+  email_2_message_id: z.string().nullable(),
+  email_3_message_id: z.string().nullable(),
+
   // Metadata
   source: z.string().nullable(),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime(),
+
+  // Error Tracking
+  error_reason: z.string().nullable(),
+  error_count: z.number().int().default(0),
+  last_error_at: z.string().datetime().nullable(),
 });
 export type Lead = z.infer<typeof LeadSchema>;
 

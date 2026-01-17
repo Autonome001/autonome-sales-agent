@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { leadsDb } from '../db/index.js';
 import { tavusService } from '../services/tavus.js';
+import { logger, logSuccess } from '../utils/logger.js';
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 
@@ -13,7 +14,7 @@ async function notifyTavusUnavailable(
     reason: string
 ): Promise<void> {
     if (!SLACK_WEBHOOK_URL) {
-        console.warn('   ⚠️ Slack webhook not configured, cannot notify about Tavus unavailability');
+        logger.warn('Slack webhook not configured, cannot notify about Tavus unavailability');
         return;
     }
 
@@ -60,12 +61,12 @@ async function notifyTavusUnavailable(
             body: JSON.stringify(message),
         });
         if (response.ok) {
-            console.log('   ✅ Slack notification sent about Tavus unavailability');
+            logSuccess('Slack notification sent about Tavus unavailability');
         } else {
-            console.error('   ❌ Failed to send Slack notification:', await response.text());
+            logger.error('Failed to send Slack notification', { metadata: { body: await response.text() } });
         }
     } catch (error) {
-        console.error('   ❌ Error sending Slack notification:', error);
+        logger.error('Error sending Slack notification', { metadata: error });
     }
 }
 
@@ -79,7 +80,7 @@ async function notifyTavusUnavailable(
  * - Google Appointment Scheduling webhooks
  */
 export async function handleGoogleCalendarWebhook(req: Request, res: Response) {
-    console.log('📅 Google Calendar webhook received');
+    logger.info('Google Calendar webhook received');
 
     try {
         const event = req.body;
@@ -87,7 +88,7 @@ export async function handleGoogleCalendarWebhook(req: Request, res: Response) {
         // Handle different Google Calendar event structures
         // Google Calendar push notification sync token
         if (event['X-Goog-Channel-Token'] || event['X-Goog-Resource-State']) {
-            console.log('   📌 Received Google Calendar push notification');
+            logger.info('Received Google Calendar push notification', { metadata: { state: event['X-Goog-Resource-State'] } });
             // This is a sync notification, acknowledge it
             if (event['X-Goog-Resource-State'] === 'sync') {
                 return res.status(200).send('Sync acknowledged');
@@ -127,13 +128,11 @@ export async function handleGoogleCalendarWebhook(req: Request, res: Response) {
         eventTitle = event.summary || event.resource?.summary || 'Consultation Call';
 
         if (!email) {
-            console.log('   ⚠️ No attendee email found in webhook payload');
-            console.log('   Payload:', JSON.stringify(event, null, 2));
+            logger.warn('No attendee email found in webhook payload', { metadata: event });
             return res.status(200).send('No attendee email found');
         }
 
-        console.log(`   👤 Attendee: ${name} (${email})`);
-        console.log(`   📋 Event: ${eventTitle}`);
+        logger.info(`Google Calendar attendee: ${name} (${email})`, { metadata: { eventTitle } });
 
         // 1. Find or acknowledge lead
         let lead = await leadsDb.findByEmail(email);
@@ -143,9 +142,9 @@ export async function handleGoogleCalendarWebhook(req: Request, res: Response) {
         if (lead) {
             firstName = lead.first_name || firstName;
             companyName = lead.company_name || companyName;
-            console.log(`   ✅ Found lead in database: ${lead.first_name} ${lead.last_name}`);
+            logger.info(`Found lead in database: ${lead.first_name} ${lead.last_name}`);
         } else {
-            console.log('   ℹ️ Lead not in database (new booking from website)');
+            logger.info('Lead not in database (new booking from website)');
         }
 
         // 2. Attempt Tavus Video Generation with graceful fallback
@@ -153,11 +152,11 @@ export async function handleGoogleCalendarWebhook(req: Request, res: Response) {
         const TAVUS_API_KEY = process.env.TAVUS_API_KEY;
 
         if (!REPLICA_ID || !TAVUS_API_KEY) {
-            console.warn('   ⚠️ Tavus not configured (missing REPLICA_ID or API_KEY)');
+            logger.warn('Tavus not configured (missing REPLICA_ID or API_KEY)');
             await notifyTavusUnavailable(
                 name || 'Unknown',
                 email,
-                'Tavus credentials not configured (TAVUS_REPLICA_ID or TAVUS_API_KEY missing)'
+                'Tavus credentials not configured'
             );
             return res.status(200).json({
                 success: true,
@@ -167,7 +166,7 @@ export async function handleGoogleCalendarWebhook(req: Request, res: Response) {
         }
 
         try {
-            console.log('   🎥 Triggering Tavus video generation...');
+            logger.info('🎥 Triggering Tavus video generation...');
             const video = await tavusService.generateVideo({
                 replicaId: REPLICA_ID,
                 script: `Hi ${firstName}, looking forward to our call about helping ${companyName} with automation and AI. See you soon!`,
@@ -178,7 +177,7 @@ export async function handleGoogleCalendarWebhook(req: Request, res: Response) {
                 }
             });
 
-            console.log(`   ✅ Video queued: ${video.video_id}`);
+            logSuccess(`Video queued: ${video.video_id}`);
 
             // Update lead with video info if we have one
             if (lead) {
@@ -197,7 +196,7 @@ export async function handleGoogleCalendarWebhook(req: Request, res: Response) {
         } catch (tavusError) {
             // Graceful fallback: booking still successful, just no video
             const errorMessage = tavusError instanceof Error ? tavusError.message : String(tavusError);
-            console.error(`   ❌ Tavus video generation failed: ${errorMessage}`);
+            logger.error('Tavus video generation failed', { metadata: tavusError });
 
             // Notify via Slack that AI agent is unavailable
             await notifyTavusUnavailable(
@@ -216,7 +215,7 @@ export async function handleGoogleCalendarWebhook(req: Request, res: Response) {
         }
 
     } catch (error) {
-        console.error('❌ Google Calendar webhook failed:', error);
+        logger.error('Google Calendar webhook failed', { metadata: error });
         res.status(500).send(error instanceof Error ? error.message : 'Unknown error');
     }
 }
@@ -226,8 +225,8 @@ export async function handleGoogleCalendarWebhook(req: Request, res: Response) {
  * @deprecated Use handleGoogleCalendarWebhook instead
  */
 export async function handleCalendlyWebhook(req: Request, res: Response) {
-    console.log('📅 Calendly webhook received (legacy)');
-    console.warn('   ⚠️ Consider switching to Google Calendar webhook');
+    logger.info('Calendly webhook received (legacy)');
+    logger.warn('Consider switching to Google Calendar webhook');
 
     const event = req.body;
     if (event.event !== 'invitee.created') {

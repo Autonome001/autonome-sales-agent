@@ -11,6 +11,8 @@ import type { Request, Response } from 'express';
 import crypto from 'crypto';
 import { conversationalAgent } from './conversational-agent.js';
 import { clearConversation, getStats } from './conversation-store.js';
+import { logger } from '../utils/logger.js';
+import { metrics } from '../utils/metrics.js';
 
 // =============================================================================
 // Types
@@ -59,7 +61,7 @@ export function verifySlackRequest(req: Request): boolean {
     const signingSecret = process.env.SLACK_SIGNING_SECRET;
 
     if (!signingSecret) {
-        console.error('❌ SLACK_SIGNING_SECRET not configured');
+        logger.error('SLACK_SIGNING_SECRET not configured');
         return false;
     }
 
@@ -103,7 +105,7 @@ async function postSlackMessage(
     threadTs?: string
 ): Promise<{ ok: boolean; ts?: string; error?: string }> {
     if (!SLACK_BOT_TOKEN) {
-        console.error('❌ SLACK_BOT_TOKEN not configured');
+        logger.error('SLACK_BOT_TOKEN not configured');
         return { ok: false, error: 'Bot token not configured' };
     }
 
@@ -123,13 +125,13 @@ async function postSlackMessage(
             }),
         });
 
-        const data = await response.json();
+        const data = await response.json() as { ok: boolean; ts?: string; error?: string };
         if (!data.ok) {
-            console.error('❌ Slack API error:', data.error);
+            logger.error('Slack API error', { metadata: { error: data.error, channel } });
         }
         return data;
     } catch (error) {
-        console.error('❌ Failed to post Slack message:', error);
+        logger.error('Failed to post Slack message', { metadata: error });
         return { ok: false, error: String(error) };
     }
 }
@@ -154,7 +156,7 @@ export async function handleSlackCommand(req: Request, res: Response) {
 
     // Process in background
     processSlashCommand(text, channel_id, user_name, response_url).catch(async (err) => {
-        console.error('❌ Error processing slash command:', err);
+        logger.error('Error processing slash command', { metadata: err });
         // Notify user of failure instead of leaving them hanging
         try {
             await fetch(response_url, {
@@ -166,7 +168,7 @@ export async function handleSlackCommand(req: Request, res: Response) {
                 })
             });
         } catch (notifyErr) {
-            console.error('Failed to notify user of error:', notifyErr);
+            logger.error('Failed to notify user of error', { metadata: notifyErr });
         }
     });
 }
@@ -177,7 +179,7 @@ async function processSlashCommand(
     userName: string,
     responseUrl: string
 ) {
-    console.log(`\n💬 Slash Command from ${userName}: "${commandText}"`);
+    logger.info(`Slack Slash Command from ${userName}: "${commandText}"`);
 
     // Handle special commands
     if (commandText.toLowerCase() === 'clear') {
@@ -236,7 +238,7 @@ async function processSlashCommand(
             userName
         );
     } catch (error) {
-        console.error('❌ Agent error:', error);
+        logger.error('Agent conversation error', { metadata: error });
         response = `❌ Sorry, I encountered an error: ${error instanceof Error ? error.message : 'Unknown error'}`;
     }
 
@@ -255,7 +257,7 @@ async function processSlashCommand(
             }),
         });
     } catch (error) {
-        console.error('❌ Failed to update message:', error);
+        logger.error('Failed to update Slack message', { metadata: error });
     }
 }
 
@@ -280,7 +282,7 @@ export async function handleSlackEvent(req: Request, res: Response) {
 
         // Only handle message events in threads (not the initial message)
         if (event.type === 'message' && event.thread_ts && !event.bot_id) {
-            console.log(`\n💬 Thread reply in ${event.channel}: "${event.text}"`);
+            logger.info(`Slack Thread reply in ${event.channel}: "${event.text}"`);
 
             // Process through conversational agent
             const response = await conversationalAgent.processMessage(
@@ -308,7 +310,7 @@ async function handleInteraction(req: Request, res: Response) {
     // Acknowledge immediately
     res.status(200).send();
 
-    console.log(`\n🖱️ Slack Interaction: ${action.action_id} by ${user.username}`);
+    logger.info(`Slack Interaction: ${action.action_id} by ${user.username}`);
 
     if (action.action_id === 'approve_booking') {
         const { leadId, reply } = JSON.parse(action.value);
@@ -336,22 +338,28 @@ async function handleBookingApproval(responseUrl: string, leadId: string, reply:
         const lead = await leadsDb.findById(leadId);
         if (!lead) throw new Error('Lead not found');
 
-        await sendingAgent.sendEmail({
+        // Send the approval email
+        const result = await sendingAgent.sendCustomEmail(
             leadId,
-            to: lead.email,
-            subject: `Re: Meeting Request`,
-            body: reply,
-            sender: lead.sender_email
-        });
+            `Re: Meeting Request`,
+            reply
+        );
 
-        await fetch(responseUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                text: `✅ *Approved by ${approver}* - Reply sent to ${lead.email}!`,
-                replace_original: true,
-            })
-        });
+        if (result.success) {
+            // Update status to engaged
+            await leadsDb.update(leadId, { status: 'engaged' });
+
+            await fetch(responseUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    text: `✅ Approved and email sent to ${lead.email} by @${approver}\n\n*Reply sent:*\n> ${reply}`,
+                    replace_original: true,
+                })
+            });
+        } else {
+            throw new Error(`Failed to send approval email: ${result.error}`);
+        }
     } catch (e: any) {
         await fetch(responseUrl, {
             method: 'POST',

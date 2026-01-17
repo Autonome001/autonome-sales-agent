@@ -31,6 +31,8 @@
 
 import { apifyConfig } from '../config/index.js';
 import type { CreateLead } from '../types/index.js';
+import { withRetry, isDefaultRetryable } from '../utils/retry.js';
+import { logger } from '../utils/logger.js';
 
 const APIFY_API_BASE = 'https://api.apify.com/v2';
 // Actor ID format uses tilde (~) not slash (/) for API calls
@@ -491,17 +493,14 @@ function transformLeadsFinderResult(lead: LeadsFinderResult): CreateLead | null 
     lastName = nameParts.slice(1).join(' ') || null;
   }
 
-  // Log what we received for debugging
-  console.log(`   Processing lead: ${firstName} ${lastName} - email: ${email || 'NONE'}, status: ${lead.email_status || 'unknown'}`);
-
   if (!email) {
-    console.log(`   ⚠️ Skipping lead - no email address`);
+    logger.warn(`Skipping lead - no email address`, { metadata: { firstName, lastName, organization: lead.orgName || lead.company } });
     return null;
   }
 
   // Skip invalid emails
   if (lead.email_status === 'invalid' || lead.email_status === 'bounced') {
-    console.log(`   ⚠️ Skipping lead - email status: ${lead.email_status}`);
+    logger.warn(`Skipping lead - email status: ${lead.email_status}`, { metadata: { email } });
     return null;
   }
 
@@ -549,66 +548,73 @@ async function runActorAndWait(
   actorId: string,
   input: LeadsFinderInput,
   apiToken: string,
-  timeoutMs: number = 180000 // 3 minutes default
+  timeoutMs: number = 900000 // 15 minutes default (increased for 1k leads)
 ): Promise<{ success: boolean; datasetId?: string; error?: string }> {
 
-  console.log('🚀 Starting Apify Leads Finder...');
-  console.log('   Actor:', actorId);
-  console.log('   Job Titles:', input.personTitleExtraIncludes?.join(', ') || 'Any');
-  console.log('   Countries:', input.personLocationCountryIncludes?.join(', ') || 'Any');
-  console.log('   States:', input.personLocationStateIncludes?.join(', ') || 'Any');
-  console.log('   Cities:', input.personLocationCityIncludes?.join(', ') || 'Any');
-  console.log('   Industries:', input.companyIndustryIncludes?.join(', ') || 'Any');
-  console.log('   Limit:', input.totalResults);
+  logger.info('Starting Apify Leads Finder...', {
+    metadata: {
+      actorId,
+      maxResults: input.totalResults,
+      industries: input.companyIndustryIncludes
+    }
+  });
 
-  try {
-    // Start the actor run with waitForFinish
-    const runResponse = await fetch(
-      `${APIFY_API_BASE}/acts/${actorId}/runs?waitForFinish=${Math.floor(timeoutMs / 1000)}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiToken}`,
-        },
-        body: JSON.stringify(input),
+  return withRetry(
+    async () => {
+      // Start the actor run with waitForFinish
+      const runResponse = await fetch(
+        `${APIFY_API_BASE}/acts/${actorId}/runs?waitForFinish=${Math.floor(timeoutMs / 1000)}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiToken}`,
+          },
+          body: JSON.stringify(input),
+        }
+      );
+
+      if (!runResponse.ok) {
+        const errorText = await runResponse.text();
+        // Make 5xx errors retryable
+        if (runResponse.status >= 500) {
+          throw new Error(`Apify API server error: ${runResponse.status} - ${errorText.slice(0, 100)}`);
+        }
+        logger.error('Apify actor start failed', { metadata: { status: runResponse.status, error: errorText } });
+        return { success: false, error: `Apify API error: ${runResponse.status} - ${errorText.slice(0, 200)}` };
       }
-    );
 
-    if (!runResponse.ok) {
-      const errorText = await runResponse.text();
-      console.error('❌ Apify actor start failed:', runResponse.status, errorText);
-      return { success: false, error: `Apify API error: ${runResponse.status} - ${errorText.slice(0, 200)}` };
-    }
+      const runData = await runResponse.json() as ApifyRunResponse;
+      console.log('   Run ID:', runData.data.id);
+      console.log('   Status:', runData.data.status);
+      console.log('   Dataset ID:', runData.data.defaultDatasetId);
 
-    const runData = await runResponse.json() as ApifyRunResponse;
-    console.log('   Run ID:', runData.data.id);
-    console.log('   Status:', runData.data.status);
-    console.log('   Dataset ID:', runData.data.defaultDatasetId);
-
-    // Check if run succeeded
-    if (runData.data.status === 'SUCCEEDED') {
-      return { success: true, datasetId: runData.data.defaultDatasetId };
-    }
-
-    // If still running, poll for completion
-    if (runData.data.status === 'RUNNING') {
-      console.log('⏳ Actor still running, polling for completion...');
-      const pollResult = await pollRunStatus(runData.data.id, apiToken, timeoutMs);
-      if (pollResult.success) {
+      // Check if run succeeded
+      if (runData.data.status === 'SUCCEEDED') {
         return { success: true, datasetId: runData.data.defaultDatasetId };
       }
-      return pollResult;
+
+      // If still running, poll for completion
+      if (runData.data.status === 'RUNNING') {
+        logger.info('Actor still running, polling for completion...');
+        const pollResult = await pollRunStatus(runData.data.id, apiToken, timeoutMs);
+        if (pollResult.success) {
+          return { success: true, datasetId: runData.data.defaultDatasetId };
+        }
+        return pollResult;
+      }
+
+      // Run failed
+      return { success: false, error: `Actor run failed with status: ${runData.data.status}` };
+    },
+    {
+      maxAttempts: 2,
+      initialDelay: 5000,
+      maxDelay: 20000,
+      backoffMultiplier: 2,
+      operationName: 'Apify actor start',
     }
-
-    // Run failed
-    return { success: false, error: `Actor run failed with status: ${runData.data.status}` };
-
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error('❌ Apify actor run error:', message);
-    return { success: false, error: message };
-  }
+  );
 }
 
 /**
@@ -661,42 +667,55 @@ async function pollRunStatus(
 }
 
 /**
- * Get results from an Apify dataset
+ * Get results from an Apify dataset (with retry)
  */
 async function getDatasetItems(
   datasetId: string,
   apiToken: string,
   limit: number = 1000
 ): Promise<LeadsFinderResult[]> {
-  try {
-    const response = await fetch(
-      `${APIFY_API_BASE}/datasets/${datasetId}/items?limit=${limit}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${apiToken}`,
-        },
+  return withRetry(
+    async () => {
+      const response = await fetch(
+        `${APIFY_API_BASE}/datasets/${datasetId}/items?limit=${limit}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${apiToken}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        const error = new Error(`Dataset fetch failed: HTTP ${response.status}`);
+        // Make 5xx errors retryable
+        if (response.status >= 500) {
+          throw error; // Will be retried
+        }
+        console.error('❌ Failed to get dataset items:', response.status);
+        return []; // Don't retry client errors
       }
-    );
 
-    if (!response.ok) {
-      console.error('❌ Failed to get dataset items:', response.status);
-      return [];
+      const items = await response.json() as LeadsFinderResult[];
+      console.log(`📊 Retrieved ${items.length} items from dataset`);
+
+      // Debug: Log the first item's raw structure to see actual field names
+      if (items.length > 0) {
+        console.log('🔍 DEBUG - First item raw fields:', JSON.stringify(items[0], null, 2));
+      }
+
+      return items;
+    },
+    {
+      maxAttempts: 3,
+      initialDelay: 2000,
+      maxDelay: 15000,
+      backoffMultiplier: 2,
+      operationName: 'Apify dataset fetch',
     }
-
-    const items = await response.json() as LeadsFinderResult[];
-    console.log(`📊 Retrieved ${items.length} items from dataset`);
-
-    // Debug: Log the first item's raw structure to see actual field names
-    if (items.length > 0) {
-      console.log('🔍 DEBUG - First item raw fields:', JSON.stringify(items[0], null, 2));
-    }
-
-    return items;
-
-  } catch (error) {
-    console.error('❌ Dataset fetch error:', error);
+  ).catch(error => {
+    logger.error('Dataset fetch error after retries', { metadata: error });
     return [];
-  }
+  });
 }
 
 // =============================================================================
@@ -710,12 +729,11 @@ async function getDatasetItems(
  * Free tier: 100 leads per run
  */
 export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScraperResult> {
-  console.log('🔍 Searching for leads via Apify Leads Finder...');
-  console.log(`   Params: ${JSON.stringify(params, null, 2)}`);
+  logger.info('Searching for leads via Apify Leads Finder...', { metadata: params });
 
   // Check for required token
   if (!apifyConfig.apiToken) {
-    console.error('❌ APIFY_API_TOKEN not configured');
+    logger.error('APIFY_API_TOKEN not configured');
     return {
       success: false,
       totalFound: 0,
@@ -758,9 +776,9 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
       // Job titles - use free text field for custom titles
       personTitleExtraIncludes: params.jobTitles?.length > 0 ? params.jobTitles : undefined,
       includeSimilarTitles: true,
-      // Seniority levels (mapped to Title Case)
+      // Seniority levels
       seniorityIncludes: mapSeniorities(params.seniorities),
-      // Person location filters - use appropriate field for countries, states, AND cities
+      // Person location filters
       personLocationCountryIncludes: countries.length > 0 ? countries : undefined,
       personLocationStateIncludes: states.length > 0 ? states : undefined,
       personLocationCityIncludes: cities.length > 0 ? cities : undefined,
@@ -771,12 +789,12 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
 
     console.log('   Actor input:', JSON.stringify(actorInput, null, 2));
 
-    // Run the actor and wait for completion
+    // Run the actor
     const runResult = await runActorAndWait(
       LEADS_FINDER_ACTOR,
       actorInput,
       apifyConfig.apiToken,
-      300000 // 5 minute timeout
+      900000 // 15 minute timeout
     );
 
     if (!runResult.success || !runResult.datasetId) {
@@ -788,7 +806,7 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
       };
     }
 
-    // Get results from the dataset
+    // Get results
     const items = await getDatasetItems(
       runResult.datasetId,
       apifyConfig.apiToken,

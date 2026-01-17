@@ -14,7 +14,7 @@ export const leadsDb = {
       .select('*')
       .eq('id', id)
       .single();
-    
+
     if (error || !data) return null;
     return data as Lead;
   },
@@ -28,7 +28,7 @@ export const leadsDb = {
       .select('*')
       .eq('email', email.toLowerCase())
       .single();
-    
+
     if (error || !data) return null;
     return data as Lead;
   },
@@ -42,7 +42,7 @@ export const leadsDb = {
       .select('*')
       .eq('linkedin_url', linkedinUrl)
       .single();
-    
+
     if (error || !data) return null;
     return data as Lead;
   },
@@ -58,7 +58,7 @@ export const leadsDb = {
         .eq('email', email.toLowerCase());
       if (count && count > 0) return true;
     }
-    
+
     if (linkedinUrl) {
       const { count } = await supabase
         .from('leads')
@@ -66,7 +66,7 @@ export const leadsDb = {
         .eq('linkedin_url', linkedinUrl);
       if (count && count > 0) return true;
     }
-    
+
     return false;
   },
 
@@ -74,7 +74,7 @@ export const leadsDb = {
    * Create a new lead
    */
   async create(lead: CreateLead): Promise<Lead> {
-    const insert: LeadInsert = {
+    const insert = {
       ...lead,
       email: lead.email.toLowerCase(),
       status: 'scraped',
@@ -82,14 +82,14 @@ export const leadsDb = {
 
     const { data, error } = await supabase
       .from('leads')
-      .insert(insert)
+      .insert(insert as any)
       .select()
       .single();
-    
+
     if (error) {
       throw new Error(`Failed to create lead: ${error.message}`);
     }
-    
+
     return data as Lead;
   },
 
@@ -104,7 +104,7 @@ export const leadsDb = {
     const batchSize = 50;
     for (let i = 0; i < leads.length; i += batchSize) {
       const batch = leads.slice(i, i + batchSize);
-      
+
       for (const lead of batch) {
         // Check for duplicates
         const exists = await this.exists(lead.email, lead.linkedin_url ?? undefined);
@@ -134,17 +134,19 @@ export const leadsDb = {
    * Update a lead
    */
   async update(id: string, updates: Partial<LeadRow>): Promise<Lead> {
-    const { data, error } = await supabase
-      .from('leads')
-      .update({ ...updates, updated_at: new Date().toISOString() })
+    const updateData = { ...updates, updated_at: new Date().toISOString() };
+
+    const { data, error } = await (supabase
+      .from('leads') as any)
+      .update(updateData)
       .eq('id', id)
       .select()
       .single();
-    
+
     if (error) {
       throw new Error(`Failed to update lead: ${error.message}`);
     }
-    
+
     return data as Lead;
   },
 
@@ -165,11 +167,11 @@ export const leadsDb = {
       .eq('status', status)
       .order('created_at', { ascending: true })
       .limit(limit);
-    
+
     if (error) {
       throw new Error(`Failed to fetch leads: ${error.message}`);
     }
-    
+
     return (data ?? []) as Lead[];
   },
 
@@ -191,17 +193,17 @@ export const leadsDb = {
       .is('replied_at', null)
       .order('created_at', { ascending: true })
       .limit(limit);
-    
+
     if (timezone) {
       query = query.eq('timezone', timezone);
     }
 
     const { data, error } = await query;
-    
+
     if (error) {
       throw new Error(`Failed to fetch leads for email: ${error.message}`);
     }
-    
+
     return (data ?? []) as Lead[];
   },
 
@@ -212,16 +214,16 @@ export const leadsDb = {
     const { data, error } = await supabase
       .from('leads')
       .select('status');
-    
+
     if (error) {
       throw new Error(`Failed to fetch status counts: ${error.message}`);
     }
 
     const counts: Record<string, number> = {};
-    for (const row of data ?? []) {
+    for (const row of (data as any[]) ?? []) {
       counts[row.status] = (counts[row.status] || 0) + 1;
     }
-    
+
     return counts;
   },
 
@@ -234,11 +236,110 @@ export const leadsDb = {
       .select('*')
       .or(`email.ilike.%${query}%,first_name.ilike.%${query}%,last_name.ilike.%${query}%,company_name.ilike.%${query}%`)
       .limit(limit);
-    
+
     if (error) {
       throw new Error(`Failed to search leads: ${error.message}`);
     }
-    
+
     return (data ?? []) as Lead[];
+  },
+
+  /**
+   * Record an error for a lead (for error quarantine system)
+   * After 3 errors, the lead should be moved to error_quarantine status
+   */
+  async recordError(leadId: string, errorReason: string): Promise<{ quarantined: boolean }> {
+    // First get current error count
+    const lead = await this.findById(leadId);
+    if (!lead) {
+      throw new Error(`Lead not found: ${leadId}`);
+    }
+
+    const newErrorCount = (lead.error_count || 0) + 1;
+    const shouldQuarantine = newErrorCount >= 3;
+
+    const updateData: any = {
+      error_reason: errorReason,
+      error_count: newErrorCount,
+      last_error_at: new Date().toISOString(),
+    };
+
+    // If 3+ errors, move to quarantine
+    if (shouldQuarantine) {
+      updateData.status = 'error_quarantine';
+      console.log(`⚠️ Lead ${leadId} quarantined after ${newErrorCount} failures`);
+    }
+
+    await this.update(leadId, updateData);
+
+    return { quarantined: shouldQuarantine };
+  },
+
+  /**
+   * Get leads with errors that haven't been quarantined yet
+   */
+  async findWithErrors(limit = 100): Promise<Lead[]> {
+    const { data, error } = await supabase
+      .from('leads')
+      .select('*')
+      .gt('error_count', 0)
+      .neq('status', 'error_quarantine')
+      .order('last_error_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.error('Failed to fetch leads with errors:', error);
+      return [];
+    }
+
+    return (data ?? []) as Lead[];
+  },
+
+  /**
+   * Get quarantined leads for review
+   */
+  async findQuarantined(limit = 100): Promise<Lead[]> {
+    const { data, error } = await supabase
+      .from('leads')
+      .select('*')
+      .eq('status', 'error_quarantine')
+      .order('last_error_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.error('Failed to fetch quarantined leads:', error);
+      return [];
+    }
+
+    return (data ?? []) as Lead[];
+  },
+
+  /**
+   * Count quarantined leads
+   */
+  async countQuarantined(): Promise<number> {
+    const { count, error } = await supabase
+      .from('leads')
+      .select('*', { count: 'exact', head: true })
+      .eq('status', 'error_quarantine');
+
+    if (error) {
+      console.error('Failed to count quarantined leads:', error);
+      return 0;
+    }
+
+    return count || 0;
+  },
+
+  /**
+   * Clear error state for a lead (after manual review/fix)
+   */
+  async clearError(leadId: string, newStatus: LeadStatus = 'scraped'): Promise<void> {
+    await this.update(leadId, {
+      error_reason: null,
+      error_count: 0,
+      last_error_at: null,
+      status: newStatus,
+    });
   },
 };

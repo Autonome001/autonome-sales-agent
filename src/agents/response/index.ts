@@ -2,6 +2,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import { anthropicConfig } from '../../config/index.js';
 import { leadsDb, eventsDb } from '../../db/index.js';
 import type { Lead, AgentResult } from '../../types/index.js';
+import { logger, logSuccess } from '../../utils/logger.js';
+import { metrics } from '../../utils/metrics.js';
 
 export type ResponseCategory =
     | 'interested'
@@ -71,14 +73,13 @@ export class ResponseAgent {
      * Process an inbound email response
      */
     async processInboundEmail(email: InboundEmail): Promise<AgentResult> {
-        console.log(`\n📨 Processing inbound email from: ${email.from}`);
-        console.log(`   Subject: ${email.subject}`);
+        logger.info(`Processing inbound email from: ${email.from}`, { metadata: { subject: email.subject } });
 
         // Find the lead by email
         const lead = await leadsDb.findByEmail(email.from);
 
         if (!lead) {
-            console.log('⚠️  No matching lead found in database');
+            logger.warn(`No matching lead found for email: ${email.from}`);
             return {
                 success: false,
                 action: 'classify_response',
@@ -89,21 +90,17 @@ export class ResponseAgent {
 
         try {
             // Classify the response
-            console.log('🧠 Classifying response...');
+            logger.info('Classifying response with Claude...');
             const classification = await this.classifyEmail(email);
 
-            console.log(`\n📊 Classification Results:`);
-            console.log(`   Category: ${classification.category}`);
-            console.log(`   Confidence: ${(classification.confidence * 100).toFixed(0)}%`);
-            console.log(`   Sentiment: ${classification.sentiment}`);
-            console.log(`   Summary: ${classification.summary}`);
+            logger.info('Classification result', { metadata: classification });
 
             // Update lead status based on classification
             const newStatus = this.mapCategoryToStatus(classification.category);
 
             await leadsDb.update(lead.id, {
                 status: newStatus,
-                last_reply_at: new Date().toISOString(),
+                replied_at: new Date().toISOString(),
                 reply_category: classification.category,
                 reply_sentiment: classification.sentiment,
             });
@@ -127,8 +124,7 @@ export class ResponseAgent {
                 },
             });
 
-            console.log(`\n✅ Lead status updated to: ${newStatus}`);
-            console.log(`   Suggested action: ${classification.suggestedAction}`);
+            logSuccess(`Lead status updated to: ${newStatus}`, { metadata: { action: classification.suggestedAction } });
 
             return {
                 success: true,
@@ -142,7 +138,8 @@ export class ResponseAgent {
             };
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error';
-            console.error('\n❌ Classification failed:', message);
+            logger.error(`Classification failed for ${email.from}`, { metadata: error });
+            metrics.increment('errorsCaught');
 
             return {
                 success: false,
@@ -170,7 +167,7 @@ export class ResponseAgent {
             Your goal is to get them to book a time or confirm a proposed time.
             Keep the tone professional but friendly. 
             Use the context of their email.
-            Include the scheduling link: ${config.config?.booking?.calendlyUrl || 'https://calendly.com/autonome/15min'}`,
+            Include the scheduling link: https://calendly.com/autonome/15min`,
             messages: [
                 {
                     role: 'user',

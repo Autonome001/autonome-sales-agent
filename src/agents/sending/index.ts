@@ -1,7 +1,9 @@
 import { Resend } from 'resend';
 import { leadsDb, eventsDb } from '../../db/index.js';
 import type { Lead, AgentResult } from '../../types/index.js';
-
+import { withRetry } from '../../utils/retry.js';
+import { logger, logSuccess } from '../../utils/logger.js';
+import { metrics } from '../../utils/metrics.js';
 export interface SendingConfig {
     resendApiKey: string;
     defaultSenderEmail: string;
@@ -38,7 +40,7 @@ export class SendingAgent {
             replyToEmail: config?.replyToEmail || process.env.REPLY_TO_EMAIL,
             sendingWindowStart: config?.sendingWindowStart || 8,  // 8am
             sendingWindowEnd: config?.sendingWindowEnd || 18,     // 6pm
-            dailyLimit: config?.dailyLimit || 100,
+            dailyLimit: config?.dailyLimit || 2000,
             delayBetweenEmails: config?.delayBetweenEmails || 600, // 0.6 seconds - respects Resend's 2 req/sec limit
         };
 
@@ -52,7 +54,14 @@ export class SendingAgent {
      */
     isWithinSendingWindow(timezone: string = 'T1'): boolean {
         const now = new Date();
+        const day = now.getDay(); // 0 = Sunday, 1 = Monday, ...
         let hour = now.getHours();
+
+        // ⛔ RESTRICTION: No sending on Sundays
+        if (day === 0) {
+            logger.warn('Today is Sunday - Sending Restricted');
+            return false;
+        }
 
         // Adjust for timezone (simplified)
         // T1 = US (no adjustment needed if you're in US)
@@ -80,43 +89,96 @@ export class SendingAgent {
     }
 
     /**
-     * Send email via Resend API
+     * Send email via Resend API (with retry)
      */
     private async sendViaResend(email: EmailToSend): Promise<SendResult> {
         if (!this.resend) {
             return { success: false, error: 'Resend API key not configured' };
         }
 
-        try {
-            const fromAddress = `${this.config.defaultSenderName} <${this.config.defaultSenderEmail}>`;
-            const htmlBody = email.htmlBody || this.textToHtml(email.body);
-            const textBody = email.body.replace(/<[^>]*>/g, ''); // Strip HTML for text version
+        const resendClient = this.resend;
+        const config = this.config;
+        const textToHtmlFn = this.textToHtml.bind(this);
 
-            const { data, error } = await this.resend.emails.send({
-                from: fromAddress,
-                to: [email.to],
-                subject: email.subject,
-                html: htmlBody,
-                text: textBody,
-                reply_to: this.config.replyToEmail || this.config.defaultSenderEmail,
+        return withRetry(
+            async () => {
+                const fromAddress = `${config.defaultSenderName} <${config.defaultSenderEmail}>`;
+                const htmlBody = email.htmlBody || textToHtmlFn(email.body);
+                const textBody = email.body.replace(/<[^>]*>/g, ''); // Strip HTML for text version
+
+                const { data, error } = await resendClient.emails.send({
+                    from: fromAddress,
+                    to: [email.to],
+                    subject: email.subject,
+                    html: htmlBody,
+                    text: textBody,
+                    replyTo: config.replyToEmail || config.defaultSenderEmail,
+                });
+
+                if (error) {
+                    // Check if this is a retryable error
+                    const errMsg = error.message.toLowerCase();
+                    if (errMsg.includes('rate') || errMsg.includes('429') || errMsg.includes('too many')) {
+                        throw new Error(`Rate limited: ${error.message}`);
+                    }
+                    if (errMsg.includes('500') || errMsg.includes('server')) {
+                        throw new Error(`Server error: ${error.message}`);
+                    }
+                    // Non-retryable errors return immediately
+                    return { success: false, error: error.message };
+                }
+
+                return {
+                    success: true,
+                    messageId: data?.id,
+                };
+            },
+            {
+                maxAttempts: 3,
+                initialDelay: 1000,
+                maxDelay: 10000,
+                backoffMultiplier: 2,
+                operationName: 'Resend email send',
+            }
+        ).catch(error => {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            logger.error(`Email send failed after retries`, { metadata: { error: message, to: email.to } });
+            return { success: false, error: message };
+        });
+    }
+
+    async sendCustomEmail(leadId: string, subject: string, body: string): Promise<AgentResult> {
+        const lead = await leadsDb.findById(leadId);
+        if (!lead) {
+            return { success: false, action: 'send_custom', message: 'Lead not found', error: 'Lead not found' };
+        }
+
+        logger.info(`Sending custom email to: ${lead.email}`, { metadata: { subject } });
+
+        const result = await this.sendViaResend({
+            to: lead.email,
+            subject: subject,
+            body: body,
+        });
+
+        if (result.success) {
+            metrics.increment('emailsSent');
+            await eventsDb.log({
+                lead_id: lead.id,
+                event_type: 'custom_email_sent',
+                event_data: { messageId: result.messageId, subject },
             });
 
-            if (error) {
-                return { success: false, error: error.message };
-            }
-
-            return {
-                success: true,
-                messageId: data?.id,
-            };
-        } catch (error) {
-            const message = error instanceof Error ? error.message : 'Unknown error';
-            return { success: false, error: message };
+            return { success: true, action: 'send_custom', message: `Custom email sent to ${lead.email}`, data: { messageId: result.messageId } };
+        } else {
+            metrics.increment('errorsCaught');
+            await leadsDb.recordError(lead.id, `Custom email failed: ${result.error}`);
+            return { success: false, action: 'send_custom', message: `Failed to send: ${result.error}`, error: result.error };
         }
     }
 
     /**
-     * Send Email 1 to a lead
+     * Send initial email (Email 1)
      */
     async sendEmail1(leadId: string): Promise<AgentResult> {
         const lead = await leadsDb.findById(leadId);
@@ -132,9 +194,12 @@ export class SendingAgent {
             return { success: false, action: 'send_email_1', message: 'Email 1 not generated', error: 'Missing email content' };
         }
 
-        console.log(`   📤 Sending to: ${lead.email}`);
-        console.log(`   📧 Subject: ${lead.email_1_subject}`);
-        console.log(`   👤 From: ${this.config.defaultSenderName} <${this.config.defaultSenderEmail}>`);
+        logger.info(`Sending Email 1 to: ${lead.email}`, {
+            metadata: {
+                subject: lead.email_1_subject,
+                sender: this.config.defaultSenderEmail
+            }
+        });
 
         const result = await this.sendViaResend({
             to: lead.email,
@@ -158,6 +223,14 @@ export class SendingAgent {
 
             return { success: true, action: 'send_email_1', message: `Email 1 sent to ${lead.email}`, data: { messageId: result.messageId } };
         } else {
+            // Record error for quarantine system
+            metrics.increment('errorsCaught');
+            try {
+                await leadsDb.recordError(lead.id, `Email 1 delivery failed: ${result.error}`);
+            } catch (dbError) {
+                logger.error('Failed to record error to database', { metadata: dbError });
+            }
+
             return { success: false, action: 'send_email_1', message: `Failed to send: ${result.error}`, error: result.error };
         }
     }
@@ -202,6 +275,13 @@ export class SendingAgent {
 
             return { success: true, action: 'send_email_2', message: `Email 2 sent to ${lead.email}` };
         } else {
+            // Record error for quarantine system
+            try {
+                await leadsDb.recordError(lead.id, `Email 2 delivery failed: ${result.error}`);
+            } catch (dbError) {
+                console.error('   ❌ Failed to record error to database:', dbError);
+            }
+
             return { success: false, action: 'send_email_2', message: `Failed to send: ${result.error}`, error: result.error };
         }
     }
@@ -245,6 +325,13 @@ export class SendingAgent {
 
             return { success: true, action: 'send_email_3', message: `Email 3 sent to ${lead.email}` };
         } else {
+            // Record error for quarantine system
+            try {
+                await leadsDb.recordError(lead.id, `Email 3 delivery failed: ${result.error}`);
+            } catch (dbError) {
+                console.error('   ❌ Failed to record error to database:', dbError);
+            }
+
             return { success: false, action: 'send_email_3', message: `Failed to send: ${result.error}`, error: result.error };
         }
     }
@@ -259,7 +346,7 @@ export class SendingAgent {
             3: 'email_2_sent',
         };
 
-        const leads = await leadsDb.findByStatus(statusMap[emailStep], limit);
+        const leads = await leadsDb.findByStatus(statusMap[emailStep] as any, limit);
 
         if (leads.length === 0) {
             return { success: true, action: `batch_email_${emailStep}`, message: `No leads ready for Email ${emailStep}` };

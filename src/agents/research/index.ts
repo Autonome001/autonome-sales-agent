@@ -4,6 +4,9 @@ import { leadsDb, eventsDb } from '../../db/index.js';
 import { googleSearch } from '../../tools/web-search.js';
 import { readUrlContent } from '../../tools/web-reader.js';
 import type { Lead, AgentResult } from '../../types/index.js';
+import { withRetry } from '../../utils/retry.js';
+import { logger, logSuccess } from '../../utils/logger.js';
+import { metrics } from '../../utils/metrics.js';
 
 export interface ResearchData {
     linkedin: {
@@ -124,11 +127,11 @@ export class ResearchAgent {
      * Full research pipeline for a lead
      */
     async researchLead(lead: Lead): Promise<AgentResult> {
-        console.log(`\n🔬 Starting research for: ${lead.first_name} ${lead.last_name} (${lead.email})`);
+        logger.info(`🔬 Starting research for: ${lead.first_name} ${lead.last_name} (${lead.email})`);
 
         try {
             // Scraping external market signals (G2, Trustpilot)
-            console.log('\n🌍 Gathering external market signals...');
+            logger.info('Gathering external market signals...');
             const companyName = lead.company_name || 'Unknown Company';
 
             // Search for reviews
@@ -142,11 +145,11 @@ export class ResearchAgent {
                 if (!url) return false;
                 const lower = url.toLowerCase();
                 return lower.includes('g2.com') ||
-                       lower.includes('trustpilot.com') ||
-                       lower.includes('capterra.com') ||
-                       lower.includes('glassdoor.com') ||
-                       lower.includes('linkedin.com') ||
-                       lower.includes(companyName.toLowerCase().replace(/\s+/g, ''));
+                    lower.includes('trustpilot.com') ||
+                    lower.includes('capterra.com') ||
+                    lower.includes('glassdoor.com') ||
+                    lower.includes('linkedin.com') ||
+                    lower.includes(companyName.toLowerCase().replace(/\s+/g, ''));
             };
 
             const g2Url = g2Results.find(r => isRelevantUrl(r.url))?.url;
@@ -156,14 +159,14 @@ export class ResearchAgent {
 
             if (relevantUrl) {
                 reviewsText = await readUrlContent(relevantUrl);
-                console.log(`   ✅ Extracted ${reviewsText.length} chars of review context from ${relevantUrl}`);
+                logger.info(`Extracted ${reviewsText.length} chars of review context from ${relevantUrl}`);
             } else {
-                console.log('   ⚠️ No direct review sites found, skipping deep review analysis');
+                logger.warn('No direct review sites found, skipping deep review analysis');
             }
 
             // AI Analysis based on available data AND scraped reviews
             // Re-running analysis to include the new context
-            console.log('\n🧠 Re-analyzing lead data with market signals...');
+            logger.info('Re-analyzing lead data with market signals...');
             const analysis = await this.analyzeResearch(lead, reviewsText);
 
             // Compile research data
@@ -198,10 +201,13 @@ export class ResearchAgent {
                 },
             });
 
-            console.log('\n✅ Research complete!');
-            console.log(`   • ${analysis.personalizationOpportunities.length} personalization opportunities`);
-            console.log(`   • ${analysis.painPoints.length} pain points identified`);
-            console.log(`   • ${analysis.uniqueFacts.length} unique facts`);
+            logSuccess(`Research complete for ${lead.email}!`, {
+                metadata: {
+                    painPointsFound: analysis.painPoints.length,
+                    personalizationOpportunities: analysis.personalizationOpportunities.length,
+                    uniqueFacts: analysis.uniqueFacts.length
+                }
+            });
 
             return {
                 success: true,
@@ -214,7 +220,14 @@ export class ResearchAgent {
             };
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error';
-            console.error('\n❌ Research failed:', message);
+            logger.error(`Research failed for ${lead.email}`, { metadata: error });
+
+            // Record error for quarantine system
+            try {
+                await leadsDb.recordError(lead.id, `Research failed: ${message}`);
+            } catch (dbError) {
+                logger.error('Failed to record error to database', { metadata: dbError });
+            }
 
             await eventsDb.log({
                 lead_id: lead.id,
@@ -232,7 +245,7 @@ export class ResearchAgent {
     }
 
     /**
-     * Analyze lead data using Claude
+     * Analyze lead data using Claude (with retry)
      */
     private async analyzeResearch(lead: Lead, reviewsContext: string = ''): Promise<ResearchAnalysis> {
         const researchContext = `
@@ -251,38 +264,61 @@ export class ResearchAgent {
 ${reviewsContext ? reviewsContext.substring(0, 5000) : 'No external review data found.'}
 `;
 
-        const response = await this.claude.messages.create({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 4096,
-            system: ANALYSIS_SYSTEM_PROMPT,
-            messages: [
-                {
-                    role: 'user',
-                    content: `Analyze this prospect and provide actionable insights for cold outreach:\n\n${researchContext}`,
+        const claude = this.claude;
+
+        return withRetry(
+            async () => {
+                const response = await claude.messages.create({
+                    model: 'claude-sonnet-4-20250514',
+                    max_tokens: 4096,
+                    system: ANALYSIS_SYSTEM_PROMPT,
+                    messages: [
+                        {
+                            role: 'user',
+                            content: `Analyze this prospect and provide actionable insights for cold outreach:\n\n${researchContext}`,
+                        },
+                    ],
+                });
+
+                const responseText = response.content[0].type === 'text' ? response.content[0].text : '';
+
+                // Parse JSON response
+                const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+                if (!jsonMatch) {
+                    throw new Error('No JSON found in Claude response');
+                }
+                return JSON.parse(jsonMatch[0]) as ResearchAnalysis;
+            },
+            {
+                maxAttempts: 3,
+                initialDelay: 2000,
+                maxDelay: 30000,
+                backoffMultiplier: 2,
+                operationName: 'Claude research analysis',
+                isRetryable: (error) => {
+                    const msg = error.message.toLowerCase();
+                    // Retry on rate limits, overloaded, server errors, network issues
+                    return msg.includes('429') ||
+                        msg.includes('rate') ||
+                        msg.includes('529') ||
+                        msg.includes('overloaded') ||
+                        msg.includes('timeout') ||
+                        msg.includes('network') ||
+                        msg.includes('500') ||
+                        msg.includes('server');
                 },
-            ],
-        });
-
-        const responseText = response.content[0].type === 'text' ? response.content[0].text : '';
-
-        // Parse JSON response
-        try {
-            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-                throw new Error('No JSON found in response');
             }
-            return JSON.parse(jsonMatch[0]) as ResearchAnalysis;
-        } catch {
-            console.warn('Failed to parse analysis JSON, using fallback');
+        ).catch(error => {
+            logger.warn('Failed to analyze with Claude after retries, using fallback', { metadata: error });
             return {
-                personalProfile: 'Analysis parsing failed - see raw research data',
-                companyProfile: 'Analysis parsing failed - see raw research data',
+                personalProfile: 'Analysis failed - see raw research data',
+                companyProfile: 'Analysis failed - see raw research data',
                 interests: [],
                 uniqueFacts: [],
                 personalizationOpportunities: [],
                 painPoints: [],
             };
-        }
+        });
     }
 
     /**
@@ -300,7 +336,7 @@ ${reviewsContext ? reviewsContext.substring(0, 5000) : 'No external review data 
             };
         }
 
-        console.log(`\n📚 Starting batch research for ${leads.length} leads (parallel processing)...\n`);
+        logger.info(`Starting batch research for ${leads.length} leads (parallel processing)...`);
 
         // Process leads in parallel with concurrency limit of 5
         // This balances speed vs API rate limits
@@ -310,7 +346,7 @@ ${reviewsContext ? reviewsContext.substring(0, 5000) : 'No external review data 
         // Process in batches of CONCURRENCY
         for (let i = 0; i < leads.length; i += CONCURRENCY) {
             const batch = leads.slice(i, i + CONCURRENCY);
-            console.log(`   Processing batch ${Math.floor(i / CONCURRENCY) + 1}/${Math.ceil(leads.length / CONCURRENCY)} (${batch.length} leads)...`);
+            logger.info(`Processing batch ${Math.floor(i / CONCURRENCY) + 1}/${Math.ceil(leads.length / CONCURRENCY)} (${batch.length} leads)...`);
 
             // Process batch in parallel
             const batchResults = await Promise.all(

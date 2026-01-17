@@ -16,6 +16,9 @@
 
 import { apolloConfig } from '../config/index.js';
 import type { CreateLead } from '../types/index.js';
+import { withRetry } from '../utils/retry.js';
+import { logger, logSuccess } from '../utils/logger.js';
+import { metrics } from '../utils/metrics.js';
 
 const APOLLO_API_BASE = 'https://api.apollo.io';
 
@@ -252,7 +255,7 @@ async function searchPeoplePaid(params: ApolloSearchParams, apiKey: string): Pro
 
   searchBody.contact_email_status = ['verified', 'guessed', 'likely'];
 
-  console.log('📤 Apollo PAID Search request:', JSON.stringify(searchBody, null, 2));
+  logger.info('Apollo PAID Search request', { metadata: { titles: params.jobTitles, locations: params.locations } });
 
   try {
     // Add timeout using AbortController
@@ -271,7 +274,7 @@ async function searchPeoplePaid(params: ApolloSearchParams, apiKey: string): Pro
     });
 
     clearTimeout(timeoutId);
-    console.log('   PAID Response status:', response.status);
+    logger.info('PAID Response status', { metadata: { status: response.status } });
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -296,8 +299,9 @@ async function searchPeoplePaid(params: ApolloSearchParams, apiKey: string): Pro
 
     const data = await response.json() as ApolloPaidSearchResponse;
 
-    console.log(`📊 Apollo PAID search returned ${data.people?.length || 0} results`);
-    console.log(`   Total available: ${data.pagination?.total_entries || 0}`);
+    logger.info(`Apollo PAID search returned ${data.people?.length || 0} results`, {
+      metadata: { total: data.pagination?.total_entries }
+    });
 
     return {
       success: true,
@@ -305,8 +309,8 @@ async function searchPeoplePaid(params: ApolloSearchParams, apiKey: string): Pro
       totalFound: data.pagination?.total_entries || 0,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return { success: false, people: [], totalFound: 0, error: message };
+    logger.error('Apollo PAID search failed', { metadata: error });
+    return { success: false, people: [], totalFound: 0, error: String(error) };
   }
 }
 
@@ -360,8 +364,7 @@ async function searchPeopleFree(params: ApolloSearchParams, apiKey: string): Pro
   }
 
   const url = `${APOLLO_API_BASE}/api/v1/mixed_people/api_search?${queryParams.toString()}`;
-  console.log('📤 Apollo FREE Search (api_search endpoint)');
-  console.log('   URL:', url.substring(0, 200) + '...');
+  logger.info('Apollo FREE Search (api_search endpoint)');
 
   try {
     // Add timeout using AbortController
@@ -380,7 +383,7 @@ async function searchPeopleFree(params: ApolloSearchParams, apiKey: string): Pro
     });
 
     clearTimeout(timeoutId);
-    console.log('   Response status:', response.status);
+    logger.info('Apollo Response status', { metadata: { status: response.status } });
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -398,12 +401,13 @@ async function searchPeopleFree(params: ApolloSearchParams, apiKey: string): Pro
 
     const data = await response.json() as ApolloSearchResponse;
 
-    console.log(`📊 Apollo FREE search returned ${data.people?.length || 0} results`);
-    console.log(`   Total available: ${data.pagination?.total_entries || 0}`);
+    logger.info(`Apollo FREE search returned ${data.people?.length || 0} results`, {
+      metadata: { total: data.pagination?.total_entries }
+    });
 
     if (data.people?.length > 0) {
       const withEmail = data.people.filter(p => p.has_email).length;
-      console.log(`   People with email available: ${withEmail}`);
+      logger.info(`People with email available: ${withEmail}`);
     }
 
     return {
@@ -415,10 +419,10 @@ async function searchPeopleFree(params: ApolloSearchParams, apiKey: string): Pro
     const message = error instanceof Error ? error.message : 'Unknown error';
     // Check if it was a timeout
     if (error instanceof Error && error.name === 'AbortError') {
-      console.error('❌ Apollo FREE search timed out after 30 seconds');
+      logger.error('Apollo FREE search timed out after 30 seconds');
       return { success: false, people: [], totalFound: 0, error: 'Apollo API request timed out' };
     }
-    console.error('❌ Apollo FREE search error:', message);
+    logger.error('Apollo FREE search error', { metadata: error });
     return { success: false, people: [], totalFound: 0, error: message };
   }
 }
@@ -430,7 +434,7 @@ async function searchPeopleFree(params: ApolloSearchParams, apiKey: string): Pro
 async function enrichPeopleById(personIds: string[], apiKey: string): Promise<ApolloEnrichedPerson[]> {
   if (personIds.length === 0) return [];
 
-  console.log(`🔍 Enriching ${personIds.length} people to get emails...`);
+  logger.info(`Enriching ${personIds.length} people to get emails...`);
 
   try {
     const response = await fetch(`${APOLLO_API_BASE}/v1/people/bulk_match`, {
@@ -449,16 +453,16 @@ async function enrichPeopleById(personIds: string[], apiKey: string): Promise<Ap
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`❌ Bulk enrichment failed: ${response.status} - ${errorText.slice(0, 200)}`);
+      logger.error('Bulk enrichment failed', { metadata: { status: response.status, body: errorText.slice(0, 200) } });
       return [];
     }
 
     const data = await response.json() as ApolloBulkMatchResponse;
-    console.log(`✅ Enriched ${data.matches?.length || 0} people with contact info`);
+    logSuccess(`Enriched ${data.matches?.length || 0} people with contact info`);
 
     return data.matches || [];
   } catch (error) {
-    console.error('❌ Bulk enrichment error:', error);
+    logger.error('Bulk enrichment error', { metadata: error });
     return [];
   }
 }
@@ -475,11 +479,10 @@ async function enrichPeopleById(personIds: string[], apiKey: string): Promise<Ap
  * When you upgrade to a paid plan, this will automatically use the faster method.
  */
 export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloScraperResult> {
-  console.log('🔍 Searching Apollo.io for leads...');
-  console.log(`   Params: ${JSON.stringify(params, null, 2)}`);
+  logger.info('Searching Apollo.io for leads...', { metadata: params });
 
   if (!apolloConfig.apiKey) {
-    console.error('❌ APOLLO_API_KEY not configured');
+    logger.error('APOLLO_API_KEY not configured');
     return {
       success: false,
       totalFound: 0,
@@ -585,7 +588,8 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
       }
     }
 
-    console.log(`✅ Final result: ${leads.length} leads with valid emails`);
+    logSuccess(`Discovery complete: Found ${leads.length} leads with valid emails`);
+    metrics.increment('leadsDiscovered', leads.length);
 
     return {
       success: true,
@@ -593,14 +597,14 @@ export async function scrapeApollo(params: ApolloSearchParams): Promise<ApolloSc
       leads,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error('❌ Apollo search failed:', message);
+    logger.error('Apollo search failed', { metadata: error });
+    metrics.increment('errorsCaught');
 
     return {
       success: false,
       totalFound: 0,
       leads: [],
-      error: message,
+      error: String(error),
     };
   }
 }

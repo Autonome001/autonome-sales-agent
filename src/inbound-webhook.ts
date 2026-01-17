@@ -13,6 +13,8 @@ import express from 'express';
 import { config } from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import Anthropic from '@anthropic-ai/sdk';
+import { logger, logSuccess } from './utils/logger.js';
+import { metrics } from './utils/metrics.js';
 
 config();
 
@@ -58,7 +60,7 @@ async function sendSlackNotification(
     classification: EmailReplyClassification
 ): Promise<void> {
     if (!SLACK_WEBHOOK_URL) {
-        console.log('⚠️  Slack webhook not configured, skipping notification');
+        logger.warn('Slack webhook not configured, skipping notification');
         return;
     }
 
@@ -90,7 +92,7 @@ async function sendSlackNotification(
     const shouldNotify = type === 'interested' || type === 'question';
 
     if (!shouldNotify) {
-        console.log(`📊 Not sending Slack notification for ${type} (FYI only)`);
+        logger.info(`Not sending Slack notification for ${type} (FYI only)`);
         return;
     }
 
@@ -169,12 +171,12 @@ async function sendSlackNotification(
         });
 
         if (response.ok) {
-            console.log('✅ Slack notification sent successfully');
+            logSuccess('Slack notification sent successfully');
         } else {
-            console.error('❌ Failed to send Slack notification:', await response.text());
+            logger.error('Failed to send Slack notification', { metadata: { status: response.status, body: await response.text() } });
         }
     } catch (error) {
-        console.error('❌ Error sending Slack notification:', error);
+        logger.error('Error sending Slack notification', { metadata: error });
     }
 }
 
@@ -262,7 +264,7 @@ async function updateLeadWithReply(
         .single();
 
     if (findError || !lead) {
-        console.error(`❌ Lead not found: ${email}`);
+        logger.error(`Lead not found for reply: ${email}`);
         return;
     }
 
@@ -290,11 +292,11 @@ async function updateLeadWithReply(
         .eq('id', lead.id);
 
     if (updateError) {
-        console.error('❌ Failed to update lead:', updateError);
+        logger.error('Failed to update lead with reply', { metadata: updateError });
         return;
     }
 
-    console.log(`✅ Lead updated: ${email} → ${newStatus} (${classification.category})`);
+    logSuccess(`Lead updated: ${email} → ${newStatus} (${classification.category})`);
 }
 
 // ============================================================================
@@ -305,11 +307,11 @@ async function updateLeadWithReply(
 const verifySlackMiddleware = (req: any, res: any, next: any) => {
     if (process.env.NODE_ENV === 'production' || process.env.SLACK_SIGNING_SECRET) {
         if (!verifySlackRequest(req)) {
-            console.error('❌ Slack signature verification failed');
+            logger.error('Slack signature verification failed');
             return res.status(401).send('Unauthorized');
         }
     } else {
-        console.warn('⚠️  Running without Slack signature verification (Dev / No Secret)');
+        logger.warn('Running without Slack signature verification (Dev / No Secret)');
     }
     next();
 };
@@ -336,38 +338,35 @@ app.post('/webhook/calendly', handleCalendlyWebhook);
 // ============================================================================
 
 app.post('/webhook/inbound-email', async (req, res) => {
-    console.log('\n📨 Received inbound email webhook');
+    logger.info('Received inbound email webhook');
 
     try {
         // Resend webhook format
         const { from, subject, text, html } = req.body;
 
         if (!from || !text) {
-            console.error('❌ Invalid webhook payload');
+            logger.error('Invalid webhook payload: missing from/text');
             return res.status(400).json({ error: 'Missing required fields' });
         }
 
-        console.log(`   From: ${from}`);
-        console.log(`   Subject: ${subject}`);
+        logger.info(`Processing reply from: ${from}`, { metadata: { subject } });
 
         // Extract email address from "Name <email@domain.com>" format
         const emailMatch = from.match(/<([^>]+)>/) || [null, from];
         const fromEmail = emailMatch[1];
 
         // Classify the reply
-        console.log('🤖 Classifying reply with Claude AI...');
+        logger.info('Classifying reply with Claude AI...');
         const classification = await classifyEmailReply(text, subject, fromEmail);
 
-        console.log(`   Category: ${classification.category}`);
-        console.log(`   Confidence: ${(classification.confidence * 100).toFixed(0)}%`);
-        console.log(`   Sentiment: ${classification.sentiment}`);
+        logger.info(`Classification result: ${classification.category}`, { metadata: classification });
 
         // Update database
-        console.log('💾 Updating lead in database...');
+        logger.info('Updating lead in database...');
         await updateLeadWithReply(fromEmail, classification, text);
 
         // Send Slack notification if action needed
-        console.log('🔔 Sending Slack notification...');
+        logger.info('Sending Slack notification for classification...', { metadata: { category: classification.category } });
         await sendSlackNotification(
             classification.category as any,
             fromEmail,
@@ -383,14 +382,20 @@ app.post('/webhook/inbound-email', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ Error processing webhook:', error);
+        logger.error('Error processing webhook', { metadata: error });
+        metrics.increment('errorsCaught');
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// Health check endpoint
+// Enhanced health check endpoint
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', service: 'autonome-inbound-webhook' });
+    res.json({
+        status: 'ok',
+        service: 'autonome-inbound-webhook',
+        uptime: metrics.getSummary().uptimeSeconds,
+        metrics: metrics.getSummary()
+    });
 });
 
 // ============================================================================

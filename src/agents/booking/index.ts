@@ -2,6 +2,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import { anthropicConfig } from '../../config/index.js';
 import { leadsDb, eventsDb } from '../../db/index.js';
 import type { Lead, AgentResult } from '../../types/index.js';
+import { logger, logSuccess } from '../../utils/logger.js';
+import { metrics } from '../../utils/metrics.js';
 
 export interface MeetingDetails {
     leadId: string;
@@ -38,7 +40,7 @@ export class BookingAgent {
      * Record a new meeting booking
      */
     async recordBooking(details: MeetingDetails): Promise<AgentResult> {
-        console.log(`\n📅 Recording meeting booking for lead: ${details.leadId}`);
+        logger.info(`Recording meeting booking for lead: ${details.leadId}`, { metadata: details });
 
         const lead = await leadsDb.findById(details.leadId);
         if (!lead) {
@@ -53,10 +55,9 @@ export class BookingAgent {
         try {
             // Update lead with meeting details
             await leadsDb.update(lead.id, {
-                status: 'meeting_scheduled',
+                status: 'meeting_booked',
                 meeting_scheduled_at: details.scheduledAt,
                 meeting_link: details.meetingLink,
-                calendar_event_id: details.calendarEventId,
             });
 
             // Log event
@@ -71,10 +72,12 @@ export class BookingAgent {
                 },
             });
 
-            console.log(`\n✅ Meeting recorded!`);
-            console.log(`   📆 Date: ${new Date(details.scheduledAt).toLocaleString()}`);
-            console.log(`   ⏱️  Duration: ${details.duration} minutes`);
-            console.log(`   👤 Lead: ${lead.first_name} ${lead.last_name}`);
+            logSuccess(`Meeting recorded for lead: ${lead.email}`, {
+                metadata: {
+                    date: new Date(details.scheduledAt).toLocaleString(),
+                    duration: details.duration
+                }
+            });
 
             return {
                 success: true,
@@ -84,7 +87,8 @@ export class BookingAgent {
             };
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error';
-            console.error('\n❌ Booking failed:', message);
+            logger.error(`Booking failed for lead: ${details.leadId}`, { metadata: error });
+            metrics.increment('errorsCaught');
             return {
                 success: false,
                 action: 'record_booking',
@@ -143,7 +147,7 @@ export class BookingAgent {
             };
         }
 
-        console.log(`\n✍️  Generating confirmation email for: ${lead.first_name} ${lead.last_name}`);
+        logger.info(`Generating confirmation email for: ${lead.first_name} ${lead.last_name}`);
 
         const meetingDate = new Date(lead.meeting_scheduled_at);
 
@@ -248,15 +252,14 @@ export class BookingAgent {
         }
 
         const statusMap = {
-            completed: 'meeting_completed',
-            no_show: 'meeting_no_show',
-            rescheduled: 'meeting_scheduled',
+            completed: 'converted',
+            no_show: 'meeting_booked',
+            rescheduled: 'meeting_booked',
         };
 
         await leadsDb.update(lead.id, {
             status: statusMap[outcome],
             meeting_outcome: outcome,
-            meeting_notes: notes,
         });
 
         await eventsDb.log({
@@ -279,7 +282,7 @@ export class BookingAgent {
      * Get upcoming meetings
      */
     async getUpcomingMeetings(days: number = 7): Promise<Lead[]> {
-        const leads = await leadsDb.findByStatus('meeting_scheduled', 50);
+        const leads = await leadsDb.findByStatus('meeting_booked', 50);
 
         const now = new Date();
         const cutoff = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
@@ -303,11 +306,11 @@ export class BookingAgent {
 
         if (!slackConfig.botToken || !slackConfig.channelId) {
             console.warn('⚠️ Slack not configured, skipping human review request');
-            return { success: false, action: 'request_review', error: 'Slack not configured' };
+            return { success: false, action: 'request_review', message: 'Slack not configured', error: 'Slack not configured' };
         }
 
         const lead = await leadsDb.findById(leadId);
-        if (!lead) return { success: false, action: 'request_review', error: 'Lead not found' };
+        if (!lead) return { success: false, action: 'request_review', message: 'Lead not found', error: 'Lead not found' };
 
         console.log(`\n📢 Sending Slack approval request for ${lead.first_name} ${lead.last_name}`);
 
@@ -397,7 +400,7 @@ export class BookingAgent {
                 })
             });
 
-            const result = await response.json();
+            const result = await response.json() as { ok: boolean; ts?: string; error?: string };
             if (!result.ok) throw new Error(result.error);
 
             return {
@@ -408,10 +411,12 @@ export class BookingAgent {
             };
         } catch (error) {
             const msg = error instanceof Error ? error.message : 'Unknown error';
-            console.error('❌ Failed to send Slack request:', msg);
+            logger.error('Failed to send Slack request', { metadata: error });
+            metrics.increment('errorsCaught');
             return {
                 success: false,
                 action: 'request_review',
+                message: `Failed to send Slack request: ${msg}`,
                 error: msg
             };
         }
@@ -421,7 +426,7 @@ export class BookingAgent {
      * Get meetings needing reminders
      */
     async getMeetingsNeedingReminders(hoursBefore: number = 24): Promise<Lead[]> {
-        const leads = await leadsDb.findByStatus('meeting_scheduled', 50);
+        const leads = await leadsDb.findByStatus('meeting_booked', 50);
 
         const now = new Date();
         const reminderWindow = new Date(now.getTime() + hoursBefore * 60 * 60 * 1000);

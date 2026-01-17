@@ -1,20 +1,31 @@
+import { withRetry } from '../utils/retry.js';
+import { logger } from '../utils/logger.js';
+
 export async function readUrlContent(url: string): Promise<string> {
-    console.log(`📖 Reading content from: ${url}`);
+    logger.info(`📖 Reading content from: ${url}`);
     try {
-        const response = await fetch(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (compatible; AutonomeBot/1.0; +http://autonome.us)'
+        const text = await withRetry(async () => {
+            const response = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (compatible; AutonomeBot/1.0; +http://autonome.us)'
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to fetch ${url}: ${response.status}`);
             }
+
+            const html = await response.text();
+            return extractTextFromHtml(html);
+        }, {
+            maxAttempts: 2,
+            initialDelay: 1000,
+            operationName: `Reading URL: ${url}`
         });
 
-        if (!response.ok) {
-            throw new Error(`Failed to fetch ${url}: ${response.status}`);
-        }
-
-        const html = await response.text();
-        return extractTextFromHtml(html);
+        return text;
     } catch (error) {
-        console.warn(`   ⚠️ Failed to read ${url}:`, error);
+        logger.warn(`Failed to read ${url}`, { metadata: error });
         return '';
     }
 }

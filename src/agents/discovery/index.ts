@@ -3,6 +3,8 @@ import { anthropicConfig } from '../../config/index.js';
 import { leadsDb, eventsDb } from '../../db/index.js';
 import { scrapeApollo, normalizeSearchParams, type ApolloSearchParams } from '../../tools/apify.js';
 import type { DiscoveryQuery, DiscoveryResult, AgentResult, Lead } from '../../types/index.js';
+import { logger, logSuccess } from '../../utils/logger.js';
+import { metrics } from '../../utils/metrics.js';
 
 const SYSTEM_PROMPT = `You are a lead discovery agent for Autonome, responsible for finding and qualifying B2B leads.
 
@@ -16,7 +18,7 @@ When parsing queries, extract:
 - locations: Cities, states, countries (e.g., "Chicago, United States", "Sydney, Australia")
 - industries: Business types or keywords (e.g., "financial planners", "marketing agencies", "SaaS")
 - job_titles: Target roles (e.g., "CEO", "Founder", "VP of Marketing")
-- max_results: Number of leads to find (default 100, max 500)
+- max_results: Number of leads to find (default 300, max 1000)
 
 If the query is missing required information, ask for clarification.
 If you have all required information, proceed with the scrape.
@@ -24,7 +26,7 @@ If you have all required information, proceed with the scrape.
 Output your response as JSON:
 {
   "action": "scrape" | "clarify" | "error",
-  "parameters": { "locations": [], "industries": [], "job_titles": [], "max_results": 100 },
+  "parameters": { "locations": [], "industries": [], "job_titles": [], "max_results": 300 },
   "message": "Human-readable response",
   "clarification_needed": ["list of missing fields"] // only if action is "clarify"
 }`;
@@ -65,10 +67,10 @@ export class DiscoveryAgent {
         messages: this.conversationHistory,
       });
 
-      const assistantMessage = response.content[0].type === 'text' 
-        ? response.content[0].text 
+      const assistantMessage = response.content[0].type === 'text'
+        ? response.content[0].text
         : '';
-      
+
       // Add assistant response to history
       this.conversationHistory.push({
         role: 'assistant',
@@ -117,11 +119,7 @@ export class DiscoveryAgent {
    * Execute a direct scrape with explicit parameters
    */
   async executeScrape(params: ApolloSearchParams): Promise<DiscoveryResult> {
-    console.log('🚀 Starting discovery scrape...');
-    console.log('   Locations:', params.locations.join(', '));
-    console.log('   Industries:', params.industries.join(', '));
-    console.log('   Job Titles:', params.jobTitles.join(', '));
-    console.log('   Max Results:', params.maxResults);
+    logger.info('🚀 Starting discovery scrape...', { metadata: params });
 
     // Normalize parameters
     const normalizedParams = normalizeSearchParams(params);
@@ -158,6 +156,12 @@ export class DiscoveryAgent {
       company: lead.company_name,
     }));
 
+    // Log success
+    logSuccess(`Discovery complete: Found ${scrapeResult.totalFound} leads, added ${created.length} new ones.`, {
+      metadata: { totalFound: scrapeResult.totalFound, created: created.length, skipped }
+    });
+    metrics.increment('leadsDiscovered', created.length);
+
     return {
       success: true,
       action: 'scrape',
@@ -187,14 +191,14 @@ export class DiscoveryAgent {
       }
 
       const parsed = JSON.parse(jsonMatch[0]);
-      
+
       return {
         action: parsed.action || 'error',
         parameters: parsed.parameters ? {
           locations: parsed.parameters.locations || [],
           industries: parsed.parameters.industries || [],
           jobTitles: parsed.parameters.job_titles || [],
-          maxResults: parsed.parameters.max_results || 100,
+          maxResults: parsed.parameters.max_results || 300,
         } : undefined,
         message: parsed.message || 'No message provided',
       };

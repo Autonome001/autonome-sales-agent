@@ -13,8 +13,8 @@ export const eventsDb = {
   async log(event: EventData): Promise<void> {
     const { error } = await supabase
       .from('events')
-      .insert(event);
-    
+      .insert(event as any);
+
     if (error) {
       console.error('Failed to log event:', error);
       // Don't throw - event logging shouldn't break the flow
@@ -27,8 +27,8 @@ export const eventsDb = {
   async logMany(events: EventData[]): Promise<void> {
     const { error } = await supabase
       .from('events')
-      .insert(events);
-    
+      .insert(events as any);
+
     if (error) {
       console.error('Failed to log events:', error);
     }
@@ -44,11 +44,11 @@ export const eventsDb = {
       .eq('lead_id', leadId)
       .order('created_at', { ascending: false })
       .limit(limit);
-    
+
     if (error) {
       throw new Error(`Failed to fetch events: ${error.message}`);
     }
-    
+
     return data ?? [];
   },
 
@@ -62,11 +62,11 @@ export const eventsDb = {
       .eq('event_type', eventType)
       .order('created_at', { ascending: false })
       .limit(limit);
-    
+
     if (error) {
       throw new Error(`Failed to fetch events: ${error.message}`);
     }
-    
+
     return data ?? [];
   },
 };

@@ -178,7 +178,7 @@ async function handleUpcoming(days: number) {
 }
 
 async function handleScheduled() {
-    const leads = await leadsDb.findByStatus('meeting_scheduled', 50);
+    const leads = await leadsDb.findByStatus('meeting_booked', 50);
 
     if (leads.length === 0) {
         console.log('📭 No scheduled meetings\n');

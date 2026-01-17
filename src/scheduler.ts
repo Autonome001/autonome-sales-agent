@@ -16,6 +16,10 @@ import cron from 'node-cron';
 import { config } from 'dotenv';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import Anthropic from '@anthropic-ai/sdk';
+import { leadsDb, eventsDb } from './db/index.js';
+import { outreachAgent } from './agents/outreach/index.js';
+import { sendingAgent } from './agents/sending/index.js';
+import { Lead } from './types/index.js';
 
 config();
 
@@ -34,41 +38,8 @@ import { ICP } from './config/icp.js';
 import { discoveryAgent } from './agents/discovery/index.js';
 import { researchAgent } from './agents/research/index.js';
 import { buildEmployeeRanges } from './tools/apify.js';
-
-async function runDiscoveryStage(limit: number): Promise<number> {
-    console.log('\n┌─────────────────────────────────────────────────────────────┐');
-    console.log('│ STAGE 0: DISCOVERY (Apify Leads Scraper)                    │');
-    console.log('└─────────────────────────────────────────────────────────────┘');
-
-    const result = await discoveryAgent.executeScrape({
-        industries: ICP.industries,
-        jobTitles: ICP.jobTitles,
-        locations: ICP.locations,
-        seniorities: ICP.seniorities,
-        employeeRanges: buildEmployeeRanges(ICP.employeeRange.min, ICP.employeeRange.max),
-        maxResults: limit  // Use PIPELINE_LIMIT directly for discovery
-    });
-
-    // Handle discovery failures gracefully - don't crash the pipeline
-    if (!result.success) {
-        console.error(`   ❌ Discovery failed: ${result.message}`);
-        return 0; // Return 0 instead of throwing to let pipeline continue
-    }
-
-    if (!result.data) {
-        console.log('   ⚠️ No data returned from discovery');
-        return 0;
-    }
-
-    // Check for zero leads found (correct property path)
-    if (result.data.total_found === 0) {
-        console.log('   ⚠️ No new leads found matching criteria');
-        return 0;
-    }
-
-    console.log(`   ✅ Discovery complete: ${result.data.new_leads} new leads added`);
-    return result.data.new_leads;
-}
+import { logger, logSuccess } from './utils/logger.js';
+import { metrics } from './utils/metrics.js';
 
 // Autonome Sales Team Senders
 const SENDERS: Sender[] = [
@@ -84,105 +55,6 @@ const BOOKING_URL = 'https://calendar.google.com/calendar/u/0/appointments/sched
 
 // Opt-out base URL
 const OPTOUT_BASE_URL = 'https://optout.autonome.us';
-
-let senderIndex = 0;
-
-function getNextSender(): Sender {
-    const sender = SENDERS[senderIndex];
-    senderIndex = (senderIndex + 1) % SENDERS.length;
-    return sender;
-}
-
-function generateSignature(sender: Sender, leadEmail: string): string {
-    const optoutUrl = `${OPTOUT_BASE_URL}?email=${encodeURIComponent(leadEmail)}`;
-
-    return `
-
-All the Best,
-
----
-${sender.name} | ${sender.title}
-Autonome | Intelligent Systems & Automations
-📅 Book a Call Now: ${BOOKING_URL}
-
-Unsubscribe from future emails: ${optoutUrl}`;
-}
-
-// ============================================================================
-// Email Body Cleaning
-// ============================================================================
-
-function cleanEmailBody(emailBody: string): string {
-    // Multi-pass comprehensive cleaning to remove ANY signature content Claude adds
-    let cleaned = emailBody;
-
-    // PASS 1: Remove common closing phrases and everything after them
-    // These patterns are GREEDY and will remove everything from the phrase onwards
-    const closingPhrases = [
-        /Best,[\s\S]*/gi,
-        /Regards,[\s\S]*/gi,
-        /Sincerely,[\s\S]*/gi,
-        /All the best,[\s\S]*/gi,
-        /Cheers,[\s\S]*/gi,
-        /Thanks,[\s\S]*/gi,
-        /Thank you,[\s\S]*/gi,
-        /Warmly,[\s\S]*/gi,
-        /Kind regards,[\s\S]*/gi,
-        /Warm regards,[\s\S]*/gi,
-    ];
-
-    for (const pattern of closingPhrases) {
-        cleaned = cleaned.replace(pattern, '');
-    }
-
-    // PASS 2: Remove placeholder patterns
-    const placeholderPatterns = [
-        /\[Name\][\s\S]*/gi,
-        /\[Your Name\][\s\S]*/gi,
-        /\[Sender Name\][\s\S]*/gi,
-    ];
-
-    for (const pattern of placeholderPatterns) {
-        cleaned = cleaned.replace(pattern, '');
-    }
-
-    // PASS 3: Remove separator lines and everything after
-    cleaned = cleaned.replace(/---[\s\S]*/g, '');
-    cleaned = cleaned.replace(/___[\s\S]*/g, '');
-    cleaned = cleaned.replace(/\n\s*-{3,}[\s\S]*/g, '');
-
-    // PASS 4: Remove unsubscribe/opt-out text
-    const unsubscribePatterns = [
-        /Unsubscribe[\s\S]*/gi,
-        /To opt out[\s\S]*/gi,
-        /Click here to unsubscribe[\s\S]*/gi,
-        /Opt out[\s\S]*/gi,
-    ];
-
-    for (const pattern of unsubscribePatterns) {
-        cleaned = cleaned.replace(pattern, '');
-    }
-
-    // PASS 5: Remove any URLs that look like unsubscribe links
-    cleaned = cleaned.replace(/https?:\/\/[^\s]*opt[-_]?out[^\s]*/gi, '');
-    cleaned = cleaned.replace(/https?:\/\/[^\s]*unsubscribe[^\s]*/gi, '');
-
-    // PASS 6: Aggressive trimming - remove multiple blank lines
-    cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
-
-    // PASS 7: Final trim
-    cleaned = cleaned.trim();
-
-    // PASS 8: Safety check - if email looks suspiciously short (< 50 chars), 
-    // it might have been over-cleaned. In that case, return original.
-    // If email is reasonable length, return cleaned version.
-    if (cleaned.length < 50 && emailBody.length > 100) {
-        console.warn('   ⚠️  Email body was over-cleaned, using original');
-        return emailBody.trim();
-    }
-
-    return cleaned;
-}
 
 // ============================================================================
 // Configuration
@@ -202,7 +74,7 @@ function getSchedulerConfig(): SchedulerConfig {
         schedule: process.env.PIPELINE_SCHEDULE || '0 9 * * *',           // Full pipeline at 9 AM
         researchSchedule: process.env.RESEARCH_SCHEDULE || '0 17 * * *',  // Research-only at 5 PM
         timezone: process.env.PIPELINE_TIMEZONE || 'America/New_York',
-        limit: parseInt(process.env.PIPELINE_LIMIT || '10', 10),
+        limit: parseInt(process.env.PIPELINE_LIMIT || '300', 10),
         slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
         enableSlack: !!process.env.SLACK_WEBHOOK_URL,
     };
@@ -212,20 +84,7 @@ function getSchedulerConfig(): SchedulerConfig {
 // Logging
 // ============================================================================
 
-function log(level: 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS', message: string, data?: any) {
-    const timestamp = new Date().toISOString();
-    const emoji = {
-        INFO: 'ℹ️',
-        WARN: '⚠️',
-        ERROR: '❌',
-        SUCCESS: '✅',
-    }[level];
-
-    console.log(`[${timestamp}] ${emoji} ${level}: ${message}`);
-    if (data) {
-        console.log(JSON.stringify(data, null, 2));
-    }
-}
+// Redundant log function removed in favor of structured logger
 
 // ============================================================================
 // Pipeline Result Types
@@ -238,6 +97,8 @@ interface PipelineResult {
     emailsSent: number;
     duration: number;
     errors: string[];
+    quarantineCount: number;
+    leadsWithErrors: number;
     // Follow-up and engagement stats (optional for backward compatibility)
     followUpStats?: {
         email2Pending: number;  // Leads waiting for Email 2 (3+ days after Email 1)
@@ -256,7 +117,7 @@ async function sendSlackNotification(
     config: SchedulerConfig
 ): Promise<void> {
     if (!config.enableSlack || !config.slackWebhookUrl) {
-        log('WARN', 'Slack notifications disabled - SLACK_WEBHOOK_URL not set');
+        logger.warn('Slack notifications disabled - SLACK_WEBHOOK_URL not set');
         return;
     }
 
@@ -278,8 +139,8 @@ async function sendSlackNotification(
             fields: [
                 { type: 'mrkdwn', text: `*🔎 Discovered:*\n${result.discovered}` },
                 { type: 'mrkdwn', text: `*🔬 Researched:*\n${result.researched}` },
-                { type: 'mrkdwn', text: `*📧 Created:*\n${result.emailsCreated}` },
                 { type: 'mrkdwn', text: `*📤 Sent:*\n${result.emailsSent}` },
+                { type: 'mrkdwn', text: `*⚠️ Quarantined:*\n${result.quarantineCount}` },
             ],
         },
     ];
@@ -334,75 +195,51 @@ async function sendSlackNotification(
             body: JSON.stringify(message),
         });
         if (!response.ok) {
-            log('ERROR', `Slack notification failed: HTTP ${response.status}`);
+            logger.error(`Slack notification failed: HTTP ${response.status}`);
         }
     } catch (error) {
-        log('ERROR', `Failed to send Slack notification: ${error instanceof Error ? error.message : String(error)}`);
+        logger.error('Failed to send Slack notification', { metadata: error });
     }
 }
 
 /**
- * Send critical failure notification to Slack when pipeline crashes
- * This ensures you ALWAYS get notified, even on unhandled exceptions
+ * Stage 0: Discovery - Find new leads
+ * Strategy: Request full batch (300 leads = ~3 min scrape time)
+ * Batch size is small enough to avoid timeouts without chunking
  */
-async function sendCriticalFailureNotification(
-    error: Error | string,
-    stage: string,
-    config: SchedulerConfig
-): Promise<void> {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    log('ERROR', `CRITICAL FAILURE [${stage}]: ${errorMessage}`);
-
-    if (!config.enableSlack || !config.slackWebhookUrl) {
-        log('WARN', 'Cannot send Slack notification - SLACK_WEBHOOK_URL not configured');
-        return;
-    }
-
-    const errorStack = error instanceof Error ? error.stack : undefined;
-
-    const blocks: any[] = [
-        {
-            type: 'header',
-            text: {
-                type: 'plain_text',
-                text: '🚨 CRITICAL: Pipeline Crashed',
-                emoji: true,
-            },
-        },
-        {
-            type: 'section',
-            text: {
-                type: 'mrkdwn',
-                text: `*Stage:* ${stage}\n*Error:* ${errorMessage}`,
-            },
-        },
-        {
-            type: 'context',
-            elements: [
-                { type: 'mrkdwn', text: `⏰ ${new Date().toISOString()}` },
-            ],
-        },
-    ];
-
-    if (errorStack) {
-        blocks.push({
-            type: 'section',
-            text: {
-                type: 'mrkdwn',
-                text: `\`\`\`${errorStack.slice(0, 500)}${errorStack.length > 500 ? '...' : ''}\`\`\``,
-            },
-        });
-    }
+async function runDiscoveryStage(totalLimit: number): Promise<number> {
+    logger.info(`🔎 DISCOVERY STAGE - Target: ${totalLimit} leads`);
 
     try {
-        await fetch(config.slackWebhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ blocks }),
+        const { scrapeApify } = await import('./tools/apify.js');
+        const { leadsDb } = await import('./db/index.js');
+
+        // Request full batch from Apify
+        const apifyResult = await scrapeApify({
+            locations: ['United States'],
+            industries: ['technology', 'software', 'saas'],
+            jobTitles: ['CEO', 'Founder', 'CTO', 'VP'],
+            maxResults: totalLimit,
         });
-        log('INFO', 'Critical failure notification sent to Slack');
-    } catch (fetchError) {
-        log('ERROR', `Failed to send critical failure notification: ${fetchError}`);
+
+        if (!apifyResult.success || !apifyResult.leads || apifyResult.leads.length === 0) {
+            logger.warn('Discovery: No leads returned from Apify');
+            return 0;
+        }
+
+        // Save all leads
+        const saveResult = await leadsDb.createMany(apifyResult.leads);
+        const totalSaved = saveResult.created.length;
+
+        logger.info(`Saved ${totalSaved} leads (${saveResult.skipped} duplicates)`);
+        logSuccess(`Discovery Complete: ${totalSaved} total leads discovered`);
+        metrics.increment('leadsDiscovered', totalSaved);
+
+        return totalSaved;
+    } catch (error) {
+        logger.error('Discovery failed', { metadata: error });
+        metrics.increment('errorsCaught');
+        throw error;
     }
 }
 
@@ -410,46 +247,9 @@ async function sendCriticalFailureNotification(
 // Database & AI Setup
 // ============================================================================
 
-interface Lead {
-    id: string;
-    email: string;
-    first_name?: string;
-    last_name?: string;
-    company_name?: string;
-    job_title?: string;
-    linkedin_url?: string;
-    status: string;
-    // Research data stored as JSONB (proper field)
-    research_data?: Record<string, any> | null;
-    research_completed_at?: string | null;
-    email_1_subject?: string;
-    email_1_body?: string;
-    email_2_body?: string;
-    email_3_subject?: string;
-    email_3_body?: string;
-    assigned_sender?: string;
-    // Reply tracking fields
-    replied_at?: string | null;
-    reply_category?: string | null;
-}
-
-async function getLeadsByStatus(supabase: SupabaseClient, status: string, limit: number): Promise<Lead[]> {
-    const { data, error } = await supabase
-        .from('leads')
-        .select('*')
-        .eq('status', status)
-        .limit(limit);
-    if (error) throw error;
-    return data || [];
-}
-
-async function updateLead(supabase: SupabaseClient, id: string, updates: Partial<Lead> & Record<string, any>): Promise<void> {
-    const { error } = await supabase
-        .from('leads')
-        .update({ ...updates, updated_at: new Date().toISOString() })
-        .eq('id', id);
-    if (error) throw error;
-}
+// ============================================================================
+// Database & Stats Helpers
+// ============================================================================
 
 async function getFollowUpStats(supabase: SupabaseClient): Promise<{
     email2Pending: number;
@@ -466,7 +266,7 @@ async function getFollowUpStats(supabase: SupabaseClient): Promise<{
     const email3Cutoff = new Date();
     email3Cutoff.setDate(email3Cutoff.getDate() - email3DelayDays);
 
-    // Count leads pending Email 2 (status = email_1_sent, sent > 3 days ago)
+    // Count leads pending Email 2
     const { count: email2Count } = await supabase
         .from('leads')
         .select('*', { count: 'exact', head: true })
@@ -474,7 +274,7 @@ async function getFollowUpStats(supabase: SupabaseClient): Promise<{
         .lt('email_1_sent_at', email2Cutoff.toISOString())
         .not('email_2_body', 'is', null);
 
-    // Count leads pending Email 3 (status = email_2_sent, Email 1 sent > 5 days ago)
+    // Count leads pending Email 3
     const { count: email3Count } = await supabase
         .from('leads')
         .select('*', { count: 'exact', head: true })
@@ -482,13 +282,13 @@ async function getFollowUpStats(supabase: SupabaseClient): Promise<{
         .lt('email_1_sent_at', email3Cutoff.toISOString())
         .not('email_3_body', 'is', null);
 
-    // Count total replies (leads with replied_at set)
+    // Count total replies
     const { count: totalReplies } = await supabase
         .from('leads')
         .select('*', { count: 'exact', head: true })
         .not('replied_at', 'is', null);
 
-    // Count interested replies (leads in 'engaged' status or with reply_category = 'interested')
+    // Count interested replies
     const { count: interestedCount } = await supabase
         .from('leads')
         .select('*', { count: 'exact', head: true })
@@ -503,38 +303,25 @@ async function getFollowUpStats(supabase: SupabaseClient): Promise<{
 }
 
 // ============================================================================
-// Stage 1: Research (uses researchAgent for proper research_data population)
+// Stage 1: Research
 // ============================================================================
 
 async function runResearchStage(supabase: SupabaseClient, anthropic: Anthropic, limit: number): Promise<number> {
-    console.log('\n┌─────────────────────────────────────────────────────────────┐');
-    console.log('│ STAGE 1: RESEARCH                                           │');
-    console.log('└─────────────────────────────────────────────────────────────┘');
+    logger.info('STAGE 1: RESEARCH');
 
-    // Use the proper research agent (same as Slack uses)
-    // This ensures research_data and research_completed_at are populated
     const result = await researchAgent.researchPendingLeads(limit);
 
     if (!result.success) {
-        console.error(`   ❌ Research failed: ${result.error || result.message}`);
+        logger.error('Research failed', { metadata: { error: result.error || result.message } });
+        metrics.increment('errorsCaught');
         return 0;
     }
 
     const data = result.data as { successful: number; failed: number; total: number } | undefined;
     const processed = data?.successful || 0;
 
-    // Assign senders to newly researched leads
-    const researchedLeads = await getLeadsByStatus(supabase, 'researched', limit);
-    for (const lead of researchedLeads) {
-        if (!lead.assigned_sender) {
-            const assignedSender = getNextSender();
-            await updateLead(supabase, lead.id, {
-                assigned_sender: assignedSender.email,
-            });
-        }
-    }
-
-    console.log(`\n🏁 Stage 1 Complete: ${processed} leads researched`);
+    logSuccess(`Stage 1 Complete: ${processed} leads researched`);
+    metrics.increment('leadsResearched', processed);
     return processed;
 }
 
@@ -542,129 +329,29 @@ async function runResearchStage(supabase: SupabaseClient, anthropic: Anthropic, 
 // Stage 2: Outreach
 // ============================================================================
 
-async function generateEmails(anthropic: Anthropic, lead: Lead, sender: Sender): Promise<{ subject1: string; body1: string; body2: string; subject3: string; body3: string }> {
-    // Extract research insights from the research_data JSONB field
-    const researchData = lead.research_data as {
-        analysis?: {
-            personalProfile?: string;
-            companyProfile?: string;
-            painPoints?: Array<{ pain: string; evidence: string; solution: string }>;
-            personalizationOpportunities?: Array<{ type: string; hook: string; evidence: string }>;
-            uniqueFacts?: string[];
-            interests?: string[];
-        }
-    } | null;
-
-    const analysis = researchData?.analysis;
-    const personalProfile = analysis?.personalProfile || '';
-    const companyProfile = analysis?.companyProfile || '';
-    const painPoints = analysis?.painPoints?.map(p => p.pain).join(', ') || 'Not available';
-    const hooks = analysis?.personalizationOpportunities?.map(p => p.hook).join('; ') || '';
-    const uniqueFacts = analysis?.uniqueFacts?.join(', ') || '';
-
-    const prompt = `You are an expert cold email copywriter. Write a 3-email sequence.
-
-CRITICAL INSTRUCTIONS - READ CAREFULLY:
-- DO NOT write "Best,", "Regards,", "Sincerely," or ANY closing salutation
-- DO NOT write the sender's name at the end
-- DO NOT include "---" separator lines
-- DO NOT include ANY unsubscribe links or opt-out text
-- DO NOT include "[Name]" or any name placeholder
-- The email body should END with your question or call-to-action
-- A professional signature will be automatically added after your content
-
-Lead Information:
-- Name: ${lead.first_name} ${lead.last_name}
-- Title: ${lead.job_title || 'Professional'}
-- Company: ${lead.company_name || 'their company'}
-
-You are writing as: ${sender.name}, ${sender.title} at Autonome
-
-Research Insights:
-- Personal Profile: ${personalProfile}
-- Company Profile: ${companyProfile}
-- Pain Points: ${painPoints}
-- Personalization Hooks: ${hooks}
-- Unique Facts: ${uniqueFacts}
-
-Write 3 emails (under 100 words each). Be conversational, not salesy.
-Each email should end with a question or soft CTA - NOTHING ELSE after that.
-
-Example of what your email body should look like:
-"Hi Sarah,
-
-Noticed you're running things with a Gmail address - respect for keeping it lean and accessible.
-
-I'm guessing like most bootstrap CEOs, you're drowning in admin tasks that eat into strategic time. Things like data entry, scheduling, basic customer follow-ups.
-
-We help CEOs like you automate the mundane stuff so you can focus on what actually moves the needle.
-
-Worth a 15-min chat?"
-
-THAT'S IT. The email ends with the question mark. No "Best," no name, no unsubscribe text.
-
-Format as JSON:
-{
-  "email1_subject": "...",
-  "email1_body": "...",
-  "email2_body": "...",
-  "email3_subject": "...",
-  "email3_body": "..."
-}`;
-
-    const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 2048,
-        messages: [{ role: 'user', content: prompt }],
-    });
-
-    const text = response.content[0].type === 'text' ? response.content[0].text : '';
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('Failed to parse email response');
-    const emails = JSON.parse(jsonMatch[0]);
-
-    // Clean the email bodies to remove any signature elements Claude might have added
-    return {
-        subject1: emails.email1_subject,
-        body1: cleanEmailBody(emails.email1_body),
-        body2: cleanEmailBody(emails.email2_body),
-        subject3: emails.email3_subject,
-        body3: cleanEmailBody(emails.email3_body),
-    };
-}
-
 async function runOutreachStage(supabase: SupabaseClient, anthropic: Anthropic, limit: number): Promise<number> {
-    console.log('\n┌─────────────────────────────────────────────────────────────┐');
-    console.log('│ STAGE 2: OUTREACH (Email Generation)                        │');
-    console.log('└─────────────────────────────────────────────────────────────┘');
+    logger.info('STAGE 2: OUTREACH (Email Generation)');
 
-    const leads = await getLeadsByStatus(supabase, 'researched', limit);
-    console.log(`📋 Found ${leads.length} leads for email generation`);
+    const leads = await leadsDb.findByStatus('researched', limit);
+    logger.info(`Found ${leads.length} leads for email generation`);
 
     let processed = 0;
     for (const lead of leads) {
         try {
-            // Get the assigned sender or assign a new one
-            const sender = lead.assigned_sender
-                ? SENDERS.find(s => s.email === lead.assigned_sender) || getNextSender()
-                : getNextSender();
-
-            console.log(`\n✉️ Generating emails for: ${lead.email} (from ${sender.name})`);
-            const emails = await generateEmails(anthropic, lead, sender);
-
-            await updateLead(supabase, lead.id, {
-                email_1_subject: emails.subject1,
-                email_1_body: emails.body1,
-                email_2_body: emails.body2,
-                email_3_subject: emails.subject3,
-                email_3_body: emails.body3,
-                assigned_sender: sender.email,
-                status: 'ready',
-            });
-            console.log(`   ✅ Emails generated`);
-            processed++;
+            const result = await outreachAgent.generateEmailSequence(lead);
+            if (result.success) {
+                logger.info(`Emails generated for: ${lead.email}`);
+                processed++;
+                metrics.increment('emailsGenerated');
+            } else {
+                logger.error(`Generation failed for: ${lead.email}`, { metadata: { error: result.error || result.message } });
+                // recordError is already handled inside outreachAgent.generateEmailSequence
+            }
         } catch (error) {
-            console.error(`   ❌ Failed: ${error instanceof Error ? error.message : error}`);
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error(`Unexpected error for: ${lead.email}`, { metadata: error });
+            await leadsDb.recordError(lead.id, `Outreach unexpected error: ${message}`);
+            metrics.increment('errorsCaught');
         }
     }
 
@@ -672,124 +359,33 @@ async function runOutreachStage(supabase: SupabaseClient, anthropic: Anthropic, 
     return processed;
 }
 
-// ============================================================================
-// Stage 3: Sending
-// ============================================================================
-
-async function sendEmailViaResend(
-    to: string,
-    subject: string,
-    body: string,
-    sender: Sender
-): Promise<{ success: boolean; error?: string }> {
-    const resendKey = process.env.RESEND_API_KEY;
-
-    if (!resendKey) {
-        return { success: false, error: 'RESEND_API_KEY not configured' };
-    }
-
-    // Add signature to body
-    const fullBody = body + generateSignature(sender, to);
-
-    try {
-        const response = await fetch('https://api.resend.com/emails', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${resendKey}`,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                from: `${sender.name} <${sender.email}>`,
-                to: [to],
-                subject,
-                html: convertTextToHtml(fullBody),
-            }),
-        });
-
-        const data = await response.json() as { message?: string };
-        if (!response.ok) {
-            return { success: false, error: data.message || 'Unknown error' };
-        }
-        return { success: true };
-    } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
-    }
-}
-
-function convertTextToHtml(text: string): string {
-    // Convert plain text to HTML with proper hyperlinks
-    let html = text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\n/g, '<br>');
-
-    // Convert "Book a Call Now: [URL]" to hyperlinked version
-    html = html.replace(
-        /📅 Book a Call Now: (https?:\/\/[^\s<]+)/g,
-        '📅 <a href="$1">Book a Call Now</a>'
-    );
-
-    // Convert "Unsubscribe from future emails: [URL]" to hyperlinked version
-    html = html.replace(
-        /Unsubscribe from future emails: (https?:\/\/[^\s<]+)/g,
-        '<a href="$1">Unsubscribe from future emails</a>'
-    );
-
-    return html;
-}
+// Stage 3: Sending Logic implemented via sendingAgent
 
 async function runSendingStage(supabase: SupabaseClient, limit: number): Promise<number> {
-    console.log('\n┌─────────────────────────────────────────────────────────────┐');
-    console.log('│ STAGE 3: SENDING (Email 1)                                  │');
-    console.log('└─────────────────────────────────────────────────────────────┘');
+    logger.info('STAGE 3: SENDING (Email 1)');
 
-    // Debug: Check status counts before sending
-    const { data: statusCounts } = await supabase
-        .from('leads')
-        .select('status');
-    const counts: Record<string, number> = {};
-    for (const row of statusCounts || []) {
-        counts[row.status] = (counts[row.status] || 0) + 1;
-    }
-    console.log('📊 Current lead status counts:', JSON.stringify(counts));
-
-    const leads = await getLeadsByStatus(supabase, 'ready', limit);
-    console.log(`📋 Found ${leads.length} leads ready to send (limit: ${limit})`);
+    const leads = await leadsDb.findByStatus('ready', limit);
+    logger.info(`Found ${leads.length} leads ready to send (limit: ${limit})`);
 
     let sent = 0;
     for (const lead of leads) {
-        if (!lead.email_1_subject || !lead.email_1_body) {
-            console.log(`\n⚠️ Skipping ${lead.email}: Missing email content`);
-            continue;
-        }
+        try {
+            logger.info(`Sending Email 1 to: ${lead.email}`);
+            const result = await sendingAgent.sendEmail1(lead.id);
 
-        // Get the assigned sender
-        const sender = lead.assigned_sender
-            ? SENDERS.find(s => s.email === lead.assigned_sender) || SENDERS[0]
-            : SENDERS[0];
-
-        console.log(`\n📤 Sending Email 1 to: ${lead.email}`);
-        console.log(`   📧 Sending to: ${lead.email}`);
-        console.log(`   📋 Subject: ${lead.email_1_subject}`);
-        console.log(`   🎤 From: ${sender.name} <${sender.email}>`);
-
-        const result = await sendEmailViaResend(
-            lead.email,
-            lead.email_1_subject,
-            lead.email_1_body,
-            sender
-        );
-
-        if (result.success) {
-            await updateLead(supabase, lead.id, {
-                status: 'email_1_sent',
-                email_1_sent_at: new Date().toISOString(),
-            });
-            console.log(`   ✅ Sent successfully`);
-            sent++;
-        } else {
-            console.log(`   ❌ Failed: ${result.error}`);
+            if (result.success) {
+                logSuccess(`Sent successfully to: ${lead.email}`);
+                sent++;
+                metrics.increment('emailsSent');
+            } else {
+                logger.error(`Failed to send to: ${lead.email}`, { metadata: { error: result.error || result.message } });
+                // recordError is already handled inside sendingAgent.sendEmail1
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error(`Unexpected sending error for: ${lead.email}`, { metadata: error });
+            await leadsDb.recordError(lead.id, `Sending unexpected error: ${message}`);
+            metrics.increment('errorsCaught');
         }
 
         // Rate limiting: Resend allows 2 requests/second, so wait 600ms between emails
@@ -797,7 +393,7 @@ async function runSendingStage(supabase: SupabaseClient, limit: number): Promise
         await new Promise(resolve => setTimeout(resolve, 600));
     }
 
-    console.log(`\n🏁 Stage 3 Complete: ${sent} emails sent`);
+    logSuccess(`Stage 3 Complete: ${sent} emails sent`);
     return sent;
 }
 
@@ -835,10 +431,9 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
         console.log(`📧 Sender rotation: ${SENDERS.map(s => s.name).join(', ')}`);
     } catch (error: any) {
         const msg = `Database connection failed: ${error.message || JSON.stringify(error)}`;
-        console.error(`❌ ${msg}`);
-        if (error.details) console.error(error.details);
-        if (error.hint) console.error(error.hint);
-        return { researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [msg] };
+        logger.error(msg, { metadata: error });
+        metrics.increment('errorsCaught');
+        return { discovered: 0, researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [msg], quarantineCount: 0, leadsWithErrors: 0 };
     }
 
 
@@ -850,7 +445,8 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
     catch (error) {
         const msg = `Discovery: ${error instanceof Error ? error.message : String(error)}`;
         errors.push(msg);
-        log('ERROR', msg);
+        logger.error(msg, { metadata: error });
+        metrics.increment('errorsCaught');
     }
 
     // Stage 1: Research - process ALL scraped leads (including newly discovered)
@@ -858,7 +454,8 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
     catch (error) {
         const msg = `Research: ${error instanceof Error ? error.message : String(error)}`;
         errors.push(msg);
-        log('ERROR', msg);
+        logger.error(msg, { metadata: error });
+        metrics.increment('errorsCaught');
     }
 
     // Stage 2: Outreach - process ALL researched leads (including newly researched)
@@ -866,7 +463,8 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
     catch (error) {
         const msg = `Outreach: ${error instanceof Error ? error.message : String(error)}`;
         errors.push(msg);
-        log('ERROR', msg);
+        logger.error(msg, { metadata: error });
+        metrics.increment('errorsCaught');
     }
 
     // Stage 3: Sending - process ALL ready leads (including newly created emails)
@@ -875,18 +473,31 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
     catch (error) {
         const msg = `Sending: ${error instanceof Error ? error.message : String(error)}`;
         errors.push(msg);
-        log('ERROR', msg);
+        logger.error(msg, { metadata: error });
+        metrics.increment('errorsCaught');
     }
 
     const duration = (Date.now() - startTime) / 1000;
+
+    // Fetch quarantine and error stats
+    let quarantineCount = 0;
+    let leadsWithErrors = 0;
+    try {
+        quarantineCount = await leadsDb.countQuarantined();
+        const leadsWithErrorList = await leadsDb.findWithErrors(100);
+        leadsWithErrors = leadsWithErrorList.length;
+        metrics.set('quarantinedLeads', quarantineCount);
+    } catch (e) {
+        logger.warn('Failed to fetch quarantine/error stats', { metadata: e });
+    }
 
     // Gather follow-up and engagement stats
     let followUpStats;
     try {
         followUpStats = await getFollowUpStats(supabase);
-        console.log('📊 Follow-up stats:', JSON.stringify(followUpStats));
+        logger.info('Follow-up stats retrieved', { metadata: followUpStats });
     } catch (error) {
-        log('WARN', `Failed to get follow-up stats: ${error instanceof Error ? error.message : String(error)}`);
+        logger.warn('Failed to get follow-up stats', { metadata: error });
     }
 
     console.log(`
@@ -897,6 +508,7 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
 │  🔬 Leads Researched:      ${String(researched).padStart(5)}                          │
 │  📧 Email Sequences Created: ${String(emailsCreated).padStart(3)}                          │
 │  📤 Emails Sent:           ${String(emailsSent).padStart(5)}                          │
+│  ⚠️  Quarantined Leads:     ${String(quarantineCount).padStart(5)}                          │
 │  ⏱️  Duration:            ${duration.toFixed(1).padStart(6)}s                         │
 ├─────────────────────────────────────────────────────────────┤
 │  📬 FOLLOW-UP STATUS                                        │
@@ -907,7 +519,7 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
 └─────────────────────────────────────────────────────────────┘
 `);
 
-    return { discovered, researched, emailsCreated, emailsSent, duration, errors, followUpStats };
+    return { discovered, researched, emailsCreated, emailsSent, duration, errors, followUpStats, quarantineCount, leadsWithErrors };
 }
 
 // ============================================================================
@@ -943,8 +555,9 @@ async function runResearchOnlyPipeline(limit: number): Promise<PipelineResult> {
         console.log('✅ Database connected');
     } catch (error: any) {
         const msg = `Database connection failed: ${error.message || JSON.stringify(error)}`;
-        console.error(`❌ ${msg}`);
-        return { researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [msg] };
+        logger.error(msg, { metadata: error });
+        metrics.increment('errorsCaught');
+        return { discovered: 0, researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [msg], quarantineCount: 0, leadsWithErrors: 0 };
     }
 
     let researched = 0;
@@ -954,7 +567,8 @@ async function runResearchOnlyPipeline(limit: number): Promise<PipelineResult> {
     catch (error) {
         const msg = `Research: ${error instanceof Error ? error.message : String(error)}`;
         errors.push(msg);
-        log('ERROR', msg);
+        logger.error(msg, { metadata: error });
+        metrics.increment('errorsCaught');
     }
 
     const duration = (Date.now() - startTime) / 1000;
@@ -968,7 +582,7 @@ async function runResearchOnlyPipeline(limit: number): Promise<PipelineResult> {
 └─────────────────────────────────────────────────────────────┘
 `);
 
-    return { discovered: 0, researched, emailsCreated: 0, emailsSent: 0, duration, errors };
+    return { discovered: 0, researched, emailsCreated: 0, emailsSent: 0, duration, errors, quarantineCount: 0, leadsWithErrors: 0 };
 }
 
 // ============================================================================
@@ -986,40 +600,36 @@ function describeCron(expression: string): string {
 }
 
 function startScheduler(config: SchedulerConfig): void {
-    log('INFO', '📅 Starting Autonome Sales Pipeline Scheduler', {
-        schedule: config.schedule,
-        researchSchedule: config.researchSchedule,
-        timezone: config.timezone,
-        limit: config.limit,
-    });
+    logger.info('📅 Starting Autonome Sales Pipeline Scheduler', { metadata: config });
 
     if (!cron.validate(config.schedule)) {
-        log('ERROR', 'Invalid cron expression', { schedule: config.schedule });
+        logger.error('Invalid cron expression', { metadata: { schedule: config.schedule } });
         process.exit(1);
     }
 
     if (!cron.validate(config.researchSchedule)) {
-        log('ERROR', 'Invalid research cron expression', { schedule: config.researchSchedule });
+        logger.error('Invalid research cron expression', { metadata: { schedule: config.researchSchedule } });
         process.exit(1);
     }
 
-    log('INFO', `⏰ Full Pipeline: ${describeCron(config.schedule)}`);
-    log('INFO', `🔬 Research Run: ${describeCron(config.researchSchedule)}`);
-    log('INFO', `📧 Senders: ${SENDERS.map(s => s.name).join(', ')}`);
+    logger.info(`⏰ Full Pipeline: ${describeCron(config.schedule)}`);
+    logger.info(`🔬 Research Run: ${describeCron(config.researchSchedule)}`);
+    logger.info(`📧 Senders: ${SENDERS.map(s => s.name).join(', ')}`);
 
     // Full pipeline (morning) - discovery, research, outreach, sending
     const fullPipelineTask = cron.schedule(
         config.schedule,
         async () => {
             try {
+                logger.info('Starting scheduled full pipeline run...');
+                metrics.increment('pipelineRuns');
                 const result = await runPipeline(config.limit);
                 await sendSlackNotification(result, config);
+                logSuccess('Scheduled full pipeline run completed');
             } catch (error) {
-                await sendCriticalFailureNotification(
-                    error instanceof Error ? error : new Error(String(error)),
-                    'Pipeline Execution (scheduled)',
-                    config
-                );
+                logger.error('Pipeline execution failed', { metadata: error });
+                metrics.increment('errorsCaught');
+                await sendSlackNotification({ discovered: 0, researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [error instanceof Error ? error.message : String(error)], quarantineCount: 0, leadsWithErrors: 0 }, config);
             }
         },
         { timezone: config.timezone }
@@ -1030,14 +640,15 @@ function startScheduler(config: SchedulerConfig): void {
         config.researchSchedule,
         async () => {
             try {
+                logger.info('Starting scheduled research pipeline run...');
+                metrics.increment('pipelineRuns');
                 const result = await runResearchOnlyPipeline(config.limit);
                 await sendSlackNotification(result, config);
+                logSuccess('Scheduled research pipeline run completed');
             } catch (error) {
-                await sendCriticalFailureNotification(
-                    error instanceof Error ? error : new Error(String(error)),
-                    'Research Pipeline (scheduled)',
-                    config
-                );
+                logger.error('Research pipeline execution failed', { metadata: error });
+                metrics.increment('errorsCaught');
+                await sendSlackNotification({ discovered: 0, researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [error instanceof Error ? error.message : String(error)], quarantineCount: 0, leadsWithErrors: 0 }, config);
             }
         },
         { timezone: config.timezone }
@@ -1046,10 +657,10 @@ function startScheduler(config: SchedulerConfig): void {
     process.on('SIGINT', () => { fullPipelineTask.stop(); researchTask.stop(); process.exit(0); });
     process.on('SIGTERM', () => { fullPipelineTask.stop(); researchTask.stop(); process.exit(0); });
 
-    log('SUCCESS', '✅ Scheduler started with 2 daily runs:');
-    log('INFO', '   📋 9 AM: Full pipeline (discover → research → outreach → send)');
-    log('INFO', '   🔬 5 PM: Research only (process any new scraped leads)');
-    log('INFO', 'Press Ctrl+C to stop');
+    logSuccess('Scheduler started with 2 daily runs:');
+    logger.info('   📋 9 AM: Full pipeline (discover → research → outreach → send)');
+    logger.info('   🔬 5 PM: Research only (process any new scraped leads)');
+    logger.info('Press Ctrl+C to stop');
 }
 
 // ============================================================================
@@ -1068,24 +679,22 @@ async function main(): Promise<void> {
 
     // Startup validation: warn if Slack notifications are disabled
     if (!config.enableSlack) {
-        log('WARN', '⚠️  SLACK_WEBHOOK_URL not set - you will NOT receive failure notifications!');
-        log('WARN', '   Set SLACK_WEBHOOK_URL in your environment to enable alerts.');
+        logger.warn('SLACK_WEBHOOK_URL not set - you will NOT receive failure notifications!');
     } else {
-        log('SUCCESS', '✅ Slack notifications enabled');
+        logSuccess('Slack notifications enabled');
     }
 
     if (args.includes('--once') || args.includes('-o')) {
-        log('INFO', 'Running pipeline once (--once flag)');
+        logger.info('Running pipeline once (--once flag)');
         try {
+            metrics.increment('pipelineRuns');
             const result = await runPipeline(config.limit);
             await sendSlackNotification(result, config);
             process.exit(result.errors.length > 0 ? 1 : 0);
         } catch (error) {
-            await sendCriticalFailureNotification(
-                error instanceof Error ? error : new Error(String(error)),
-                'Pipeline (--once mode)',
-                config
-            );
+            logger.error('Pipeline execution failed in --once mode', { metadata: error });
+            metrics.increment('errorsCaught');
+            await sendSlackNotification({ discovered: 0, researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [error instanceof Error ? error.message : String(error)], quarantineCount: 0, leadsWithErrors: 0 }, config);
             process.exit(1);
         }
     } else if (args.includes('--help') || args.includes('-h')) {
@@ -1117,13 +726,21 @@ ${SENDERS.map(s => `  - ${s.name} (${s.email}) - ${s.title}`).join('\n')}
 }
 
 // Global error handler with notification
-main().catch(async (error) => {
-    const config = getSchedulerConfig();
-    log('ERROR', 'Scheduler crashed', { error: error instanceof Error ? error.message : String(error) });
-    await sendCriticalFailureNotification(
-        error instanceof Error ? error : new Error(String(error)),
-        'Scheduler Startup',
-        config
-    );
-    process.exit(1);
-});
+import { fileURLToPath } from 'url';
+import path from 'path';
+
+const isMainModule = () => {
+    if (!process.argv[1]) return false;
+    const entryFile = process.argv[1];
+    const currentFile = fileURLToPath(import.meta.url);
+    return entryFile === currentFile || path.relative(entryFile, currentFile) === '';
+};
+
+if (isMainModule()) {
+    main().catch(async (error) => {
+        logger.error('Scheduler crashed', { metadata: error });
+        process.exit(1);
+    });
+}
+
+export { startScheduler, getSchedulerConfig };

@@ -8,9 +8,14 @@
  *   - Email 3: 7 days after Email 1
  */
 
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import cron from 'node-cron';
 import { config } from 'dotenv';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { leadsDb, eventsDb } from './db/index.js';
+import { sendingAgent } from './agents/sending/index.js';
+import { Lead } from './types/index.js';
+import { logger, logSuccess } from './utils/logger.js';
+import { metrics } from './utils/metrics.js';
 
 config();
 
@@ -47,36 +52,14 @@ function getConfig(): FollowUpConfig {
 // Types
 // ============================================================================
 
-interface Lead {
-    id: string;
-    email: string;
-    first_name?: string;
-    last_name?: string;
-    status: string;
-    email_1_sent_at?: string;
-    email_2_sent_at?: string;
-    email_1_subject?: string;
-    email_2_body?: string;
-    email_3_subject?: string;
-    email_3_body?: string;
-}
-
 interface FollowUpResult {
     email2Sent: number;
     email3Sent: number;
+    quarantineCount: number;
     errors: string[];
 }
 
-// ============================================================================
-// Logging
-// ============================================================================
-
-function log(level: 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS', message: string, data?: any) {
-    const timestamp = new Date().toISOString();
-    const emoji = { INFO: 'ℹ️', WARN: '⚠️', ERROR: '❌', SUCCESS: '✅' }[level];
-    console.log(`[${timestamp}] ${emoji} ${level}: ${message}`);
-    if (data) console.log(JSON.stringify(data, null, 2));
-}
+// Removed legacy log function
 
 // ============================================================================
 // Slack Notifications
@@ -84,7 +67,7 @@ function log(level: 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS', message: string, data
 
 async function sendSlackNotification(result: FollowUpResult, config: FollowUpConfig): Promise<void> {
     if (!config.slackWebhookUrl) {
-        log('WARN', 'Slack notifications disabled - SLACK_WEBHOOK_URL not set');
+        logger.warn('Slack notifications disabled - SLACK_WEBHOOK_URL not set');
         return;
     }
 
@@ -106,6 +89,7 @@ async function sendSlackNotification(result: FollowUpResult, config: FollowUpCon
             fields: [
                 { type: 'mrkdwn', text: `*Email 2 Sent:*\n${result.email2Sent}` },
                 { type: 'mrkdwn', text: `*Email 3 Sent:*\n${result.email3Sent}` },
+                { type: 'mrkdwn', text: `*⚠️ Quarantined:*\n${result.quarantineCount}` },
             ],
         },
     ];
@@ -127,10 +111,10 @@ async function sendSlackNotification(result: FollowUpResult, config: FollowUpCon
             body: JSON.stringify({ blocks }),
         });
         if (!response.ok) {
-            log('ERROR', `Slack notification failed: HTTP ${response.status}`);
+            logger.error(`Slack notification failed: HTTP ${response.status}`);
         }
     } catch (error) {
-        log('ERROR', `Failed to send Slack notification: ${error instanceof Error ? error.message : String(error)}`);
+        logger.error('Failed to send Slack notification', { metadata: error });
     }
 }
 
@@ -140,10 +124,10 @@ async function sendCriticalFailureNotification(
     config: FollowUpConfig
 ): Promise<void> {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    log('ERROR', `CRITICAL FAILURE [${stage}]: ${errorMessage}`);
+    logger.error(`CRITICAL FAILURE [${stage}]`, { metadata: error });
 
     if (!config.slackWebhookUrl) {
-        log('WARN', 'Cannot send Slack notification - SLACK_WEBHOOK_URL not configured');
+        logger.warn('Cannot send Slack notification - SLACK_WEBHOOK_URL not configured');
         return;
     }
 
@@ -189,9 +173,9 @@ async function sendCriticalFailureNotification(
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ blocks }),
         });
-        log('INFO', 'Critical failure notification sent to Slack');
+        logger.info('Critical failure notification sent to Slack');
     } catch (fetchError) {
-        log('ERROR', `Failed to send critical failure notification: ${fetchError}`);
+        logger.error('Failed to send critical failure notification', { metadata: fetchError });
     }
 }
 
@@ -213,7 +197,7 @@ async function getLeadsForEmail2(supabase: SupabaseClient, delayDays: number): P
     if (error) {
         throw new Error(`Supabase query failed (getLeadsForEmail2): ${error.message || JSON.stringify(error)}`);
     }
-    return data || [];
+    return (data || []) as Lead[];
 }
 
 async function getLeadsForEmail3(supabase: SupabaseClient, delayDays: number): Promise<Lead[]> {
@@ -230,102 +214,50 @@ async function getLeadsForEmail3(supabase: SupabaseClient, delayDays: number): P
     if (error) {
         throw new Error(`Supabase query failed (getLeadsForEmail3): ${error.message || JSON.stringify(error)}`);
     }
-    return data || [];
-}
-
-async function updateLead(supabase: SupabaseClient, id: string, updates: any): Promise<void> {
-    const { error } = await supabase
-        .from('leads')
-        .update({ ...updates, updated_at: new Date().toISOString() })
-        .eq('id', id);
-    if (error) {
-        throw new Error(`Supabase update failed (lead ${id}): ${error.message || JSON.stringify(error)}`);
-    }
+    return (data || []) as Lead[];
 }
 
 // ============================================================================
 // Email Sending
 // ============================================================================
 
-async function sendEmail(
-    config: FollowUpConfig,
-    to: string,
-    subject: string,
-    body: string,
-    retries = 2
-): Promise<{ success: boolean; error?: string }> {
-    if (!config.resendKey) {
-        return { success: false, error: 'RESEND_API_KEY not configured' };
-    }
-
-    try {
-        const response = await fetch('https://api.resend.com/emails', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${config.resendKey}`,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                from: `${config.defaultSenderName} <${config.defaultSenderEmail}>`,
-                to: [to],
-                subject,
-                text: body,
-            }),
-        });
-
-        const data = await response.json();
-        if (!response.ok) {
-            // Handle rate limiting with exponential backoff
-            if (response.status === 429 && retries > 0) {
-                const waitTime = 1000 * (3 - retries); // 1s, 2s backoff
-                log('WARN', `Rate limited, retrying in ${waitTime}ms... (${retries} retries left)`);
-                await new Promise(resolve => setTimeout(resolve, waitTime));
-                return sendEmail(config, to, subject, body, retries - 1);
-            }
-            // Ensure error is always a string
-            const errorMsg = typeof data.message === 'string'
-                ? data.message
-                : (data.message ? JSON.stringify(data.message) : JSON.stringify(data));
-            return { success: false, error: errorMsg };
-        }
-        return { success: true };
-    } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
-}
+// Email sending logic is now handled by sendingAgent
 
 // ============================================================================
 // Follow-up Processing
 // ============================================================================
 
 async function processEmail2Followups(supabase: SupabaseClient, config: FollowUpConfig): Promise<{ sent: number; errors: string[] }> {
-    log('INFO', `Checking for Email 2 follow-ups (${config.email2DelayDays} days after Email 1)`);
+    logger.info(`Checking for Email 2 follow-ups (${config.email2DelayDays} days after Email 1)`);
 
     const leads = await getLeadsForEmail2(supabase, config.email2DelayDays);
-    log('INFO', `Found ${leads.length} leads due for Email 2`);
+    logger.info(`Found ${leads.length} leads due for Email 2`);
 
     let sent = 0;
     const errors: string[] = [];
 
     for (const lead of leads) {
-        if (!lead.email_2_body) continue;
+        try {
+            logger.info(`Sending Email 2 to: ${lead.email}`);
+            const result = await sendingAgent.sendEmail2(lead.id);
 
-        const subject = `Re: ${lead.email_1_subject || 'Following up'}`;
-        log('INFO', `Sending Email 2 to: ${lead.email}`);
-
-        const result = await sendEmail(config, lead.email, subject, lead.email_2_body);
-
-        if (result.success) {
-            await updateLead(supabase, lead.id, { status: 'email_2_sent', email_2_sent_at: new Date().toISOString() });
-            log('SUCCESS', `Email 2 sent to ${lead.email}`);
-            sent++;
-        } else {
-            log('ERROR', `Failed: ${result.error}`);
-            errors.push(`${lead.email}: ${result.error}`);
+            if (result.success) {
+                logSuccess(`Email 2 sent to ${lead.email}`);
+                sent++;
+                metrics.increment('emailsSent');
+            } else {
+                logger.error(`Failed to send Email 2: ${result.error || result.message}`);
+                errors.push(`${lead.email}: ${result.error || result.message}`);
+                // recordError is already handled inside sendingAgent.sendEmail2
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error(`Unexpected error sending Email 2 to ${lead.email}`, { metadata: error });
+            errors.push(`${lead.email}: ${message}`);
+            await leadsDb.recordError(lead.id, `Email 2 unexpected error: ${message}`);
         }
 
-        // Rate limiting: Resend allows 2 requests/second, so wait 600ms between emails
-        // This ensures we stay safely under the limit (500ms = exactly 2/sec, 600ms = safety margin)
+        // Rate limiting handled in loop
         await new Promise(resolve => setTimeout(resolve, 600));
     }
 
@@ -333,32 +265,36 @@ async function processEmail2Followups(supabase: SupabaseClient, config: FollowUp
 }
 
 async function processEmail3Followups(supabase: SupabaseClient, config: FollowUpConfig): Promise<{ sent: number; errors: string[] }> {
-    log('INFO', `Checking for Email 3 follow-ups (${config.email3DelayDays} days after Email 1)`);
+    logger.info(`Checking for Email 3 follow-ups (${config.email3DelayDays} days after Email 1)`);
 
     const leads = await getLeadsForEmail3(supabase, config.email3DelayDays);
-    log('INFO', `Found ${leads.length} leads due for Email 3`);
+    logger.info(`Found ${leads.length} leads due for Email 3`);
 
     let sent = 0;
     const errors: string[] = [];
 
     for (const lead of leads) {
-        if (!lead.email_3_body || !lead.email_3_subject) continue;
+        try {
+            logger.info(`Sending Email 3 to: ${lead.email}`);
+            const result = await sendingAgent.sendEmail3(lead.id);
 
-        log('INFO', `Sending Email 3 to: ${lead.email}`);
-
-        const result = await sendEmail(config, lead.email, lead.email_3_subject, lead.email_3_body);
-
-        if (result.success) {
-            await updateLead(supabase, lead.id, { status: 'email_3_sent', email_3_sent_at: new Date().toISOString() });
-            log('SUCCESS', `Email 3 sent to ${lead.email}`);
-            sent++;
-        } else {
-            log('ERROR', `Failed: ${result.error}`);
-            errors.push(`${lead.email}: ${result.error}`);
+            if (result.success) {
+                logSuccess(`Email 3 sent to ${lead.email}`);
+                sent++;
+                metrics.increment('emailsSent');
+            } else {
+                logger.error(`Failed to send Email 3: ${result.error || result.message}`);
+                errors.push(`${lead.email}: ${result.error || result.message}`);
+                // recordError is already handled inside sendingAgent.sendEmail3
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error(`Unexpected error sending Email 3 to ${lead.email}`, { metadata: error });
+            errors.push(`${lead.email}: ${message}`);
+            await leadsDb.recordError(lead.id, `Email 3 unexpected error: ${message}`);
         }
 
-        // Rate limiting: Resend allows 2 requests/second, so wait 600ms between emails
-        // This ensures we stay safely under the limit (500ms = exactly 2/sec, 600ms = safety margin)
+        // Rate limiting
         await new Promise(resolve => setTimeout(resolve, 600));
     }
 
@@ -399,12 +335,12 @@ async function countPendingFollowups(supabase: SupabaseClient, config: FollowUpC
 
 async function runFollowups(): Promise<FollowUpResult | null> {
     const config = getConfig();
-    const result: FollowUpResult = { email2Sent: 0, email3Sent: 0, errors: [] };
+    const result: FollowUpResult = { email2Sent: 0, email3Sent: 0, quarantineCount: 0, errors: [] };
 
     // Validate required environment variables
     if (!config.supabaseUrl || !config.supabaseKey) {
         const msg = 'Missing SUPABASE_URL or SUPABASE_ANON_KEY environment variables';
-        log('ERROR', msg);
+        logger.error(msg);
         result.errors.push(msg);
         return result;
     }
@@ -419,7 +355,7 @@ async function runFollowups(): Promise<FollowUpResult | null> {
         }
     } catch (connError) {
         const msg = `Database connection failed: ${connError instanceof Error ? connError.message : String(connError)}`;
-        log('ERROR', msg);
+        logger.error(msg, { metadata: connError });
         result.errors.push(msg);
         return result;
     }
@@ -429,13 +365,13 @@ async function runFollowups(): Promise<FollowUpResult | null> {
         const pending = await countPendingFollowups(supabase, config);
 
         if (pending.email2Count === 0 && pending.email3Count === 0) {
-            log('INFO', 'No pending follow-ups - skipping run');
+            logger.info('No pending follow-ups - skipping run');
             return null; // null signals "nothing to do" - no Slack notification needed
         }
 
-        log('INFO', `Found ${pending.email2Count} Email 2 and ${pending.email3Count} Email 3 follow-ups pending`);
+        logger.info(`Found ${pending.email2Count} Email 2 and ${pending.email3Count} Email 3 follow-ups pending`);
     } catch (countError) {
-        log('WARN', `Could not count pending follow-ups, proceeding with full check: ${countError}`);
+        logger.warn('Could not count pending follow-ups, proceeding with full check', { metadata: countError });
     }
 
     console.log(`
@@ -452,7 +388,7 @@ async function runFollowups(): Promise<FollowUpResult | null> {
         // CRITICAL: Add delay between Email 2 and Email 3 batches
         // This prevents the last Email 2 and first Email 3 from hitting rate limits
         if (email2Result.sent > 0) {
-            log('INFO', 'Waiting 600ms before Email 3 batch to respect rate limits...');
+            logger.info('Waiting 600ms before Email 3 batch to respect rate limits...');
             await new Promise(resolve => setTimeout(resolve, 600));
         }
 
@@ -473,12 +409,20 @@ async function runFollowups(): Promise<FollowUpResult | null> {
         result.errors.push(errorMsg);
     }
 
+    // Fetch quarantine stats
+    try {
+        result.quarantineCount = await leadsDb.countQuarantined();
+    } catch (e) {
+        logger.warn('Failed to fetch quarantine stats', { metadata: e });
+    }
+
     console.log(`
 ┌─────────────────────────────────────────────────────────────┐
 │                 📊 FOLLOW-UP SUMMARY                        │
 ├─────────────────────────────────────────────────────────────┤
 │  📧 Email 2 Sent:  ${String(result.email2Sent).padStart(5)}                               │
 │  📧 Email 3 Sent:  ${String(result.email3Sent).padStart(5)}                               │
+│  ⚠️  Quarantined:    ${String(result.quarantineCount).padStart(5)}                               │
 │  ❌ Errors:        ${String(result.errors.length).padStart(5)}                               │
 └─────────────────────────────────────────────────────────────┘
 `);
@@ -492,13 +436,13 @@ async function runFollowups(): Promise<FollowUpResult | null> {
 
 function startWatchMode(): void {
     const config = getConfig();
-    log('INFO', '👀 Starting follow-up watcher (runs every hour)');
+    logger.info('👀 Starting follow-up watcher (runs every hour)');
 
     // Startup validation
     if (!config.slackWebhookUrl) {
-        log('WARN', '⚠️  SLACK_WEBHOOK_URL not set - you will NOT receive failure notifications!');
+        logger.warn('SLACK_WEBHOOK_URL not set - you will NOT receive failure notifications!');
     } else {
-        log('SUCCESS', '✅ Slack notifications enabled');
+        logSuccess('Slack notifications enabled');
     }
 
     // Run immediately on start
@@ -532,7 +476,7 @@ function startWatchMode(): void {
         }
     });
 
-    log('INFO', 'Watcher started. Press Ctrl+C to stop.');
+    logger.info('Watcher started. Press Ctrl+C to stop.');
 }
 
 // ============================================================================
@@ -551,9 +495,9 @@ async function main(): Promise<void> {
 
     // Startup validation
     if (!config.slackWebhookUrl) {
-        log('WARN', '⚠️  SLACK_WEBHOOK_URL not set - you will NOT receive failure notifications!');
+        logger.warn('SLACK_WEBHOOK_URL not set - you will NOT receive failure notifications!');
     } else {
-        log('SUCCESS', '✅ Slack notifications enabled');
+        logSuccess('Slack notifications enabled');
     }
 
     if (args.includes('--watch') || args.includes('-w')) {
@@ -596,7 +540,7 @@ Environment Variables:
 // Global error handler with notification
 main().catch(async (error) => {
     const config = getConfig();
-    log('ERROR', 'Follow-up scheduler crashed', { error: error instanceof Error ? error.message : String(error) });
+    logger.error('Follow-up scheduler crashed', { metadata: error });
     await sendCriticalFailureNotification(
         error instanceof Error ? error : new Error(String(error)),
         'Scheduler Startup',

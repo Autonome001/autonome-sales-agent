@@ -2,6 +2,9 @@ import Anthropic from '@anthropic-ai/sdk';
 import { anthropicConfig } from '../../config/index.js';
 import { leadsDb, eventsDb } from '../../db/index.js';
 import type { Lead, AgentResult } from '../../types/index.js';
+import { withRetry } from '../../utils/retry.js';
+import { logger, logSuccess } from '../../utils/logger.js';
+import { metrics } from '../../utils/metrics.js';
 
 export interface EmailSequence {
     email1: {
@@ -128,7 +131,7 @@ export class OutreachAgent {
     }
 
     async generateEmailSequence(lead: Lead): Promise<AgentResult> {
-        console.log(`\n📧 Generating email sequence for: ${lead.first_name} ${lead.last_name} (${lead.email})`);
+        logger.info(`📧 Generating email sequence for: ${lead.first_name} ${lead.last_name} (${lead.email})`);
 
         if (lead.status !== 'researched' && !lead.research_data) {
             return {
@@ -144,7 +147,7 @@ export class OutreachAgent {
             const analysis = researchData?.analysis || {};
             const context = this.buildEmailContext(lead, analysis);
 
-            console.log('✍️  Writing personalized emails...');
+            logger.info('Writing personalized emails...');
             const sequence = await this.generateWithClaude(context);
 
             const timezone = this.determineTimezone(lead);
@@ -167,9 +170,9 @@ export class OutreachAgent {
                 event_data: { timezone, senderEmail },
             });
 
-            console.log('\n✅ Email sequence generated!');
-            console.log(`   📬 Sender: ${senderEmail}`);
-            console.log(`   🌍 Timezone: ${timezone}`);
+            logSuccess(`Email sequence generated for ${lead.email}!`, {
+                metadata: { senderEmail, timezone }
+            });
 
             return {
                 success: true,
@@ -179,7 +182,15 @@ export class OutreachAgent {
             };
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error';
-            console.error('\n❌ Email generation failed:', message);
+            logger.error(`Email generation failed for ${lead.email}`, { metadata: error });
+
+            // Record error for quarantine system
+            try {
+                await leadsDb.recordError(lead.id, `Outreach failed: ${message}`);
+            } catch (dbError) {
+                logger.error('Failed to record error to database', { metadata: dbError });
+            }
+
             return {
                 success: false,
                 action: 'outreach',
@@ -252,26 +263,51 @@ Refers to the company as "${shortCompany}" to sound natural (e.g. "I saw ${short
     }
 
     private async generateWithClaude(context: string): Promise<EmailSequence> {
-        const response = await this.claude.messages.create({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 2048,
-            system: EMAIL_SYSTEM_PROMPT,
-            messages: [{ role: 'user', content: `Generate a 3-email cold outreach sequence for this prospect:\n\n${context}` }],
-        });
+        const claude = this.claude;
+        const calendlyUrl = this.config.calendlyUrl;
 
-        const responseText = response.content[0].type === 'text' ? response.content[0].text : '';
+        return withRetry(
+            async () => {
+                const response = await claude.messages.create({
+                    model: 'claude-sonnet-4-20250514',
+                    max_tokens: 2048,
+                    system: EMAIL_SYSTEM_PROMPT,
+                    messages: [{ role: 'user', content: `Generate a 3-email cold outreach sequence for this prospect:\n\n${context}` }],
+                });
 
-        try {
-            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) throw new Error('No JSON found');
-            return JSON.parse(jsonMatch[0]) as EmailSequence;
-        } catch {
+                const responseText = response.content[0].type === 'text' ? response.content[0].text : '';
+
+                const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+                if (!jsonMatch) throw new Error('No JSON found in Claude response');
+                return JSON.parse(jsonMatch[0]) as EmailSequence;
+            },
+            {
+                maxAttempts: 3,
+                initialDelay: 2000,
+                maxDelay: 30000,
+                backoffMultiplier: 2,
+                operationName: 'Claude email generation',
+                isRetryable: (error) => {
+                    const msg = error.message.toLowerCase();
+                    // Retry on rate limits, overloaded, server errors, network issues
+                    return msg.includes('429') ||
+                        msg.includes('rate') ||
+                        msg.includes('529') ||
+                        msg.includes('overloaded') ||
+                        msg.includes('timeout') ||
+                        msg.includes('network') ||
+                        msg.includes('500') ||
+                        msg.includes('server');
+                },
+            }
+        ).catch(error => {
+            logger.warn('Failed to generate emails with Claude after retries, using fallback', { metadata: error });
             return {
                 email1: { subject: 'Quick question', body: `Hi ${context.match(/Name: (\w+)/)?.[1] || 'there'},\n\nWorth a quick chat about automation?` },
                 email2: { body: 'Just bumping this up - would love to hear your thoughts.' },
-                email3: { subject: 'Last try', body: `Here's my calendar if interested: ${this.config.calendlyUrl}` },
+                email3: { subject: 'Last try', body: `Here's my calendar if interested: ${calendlyUrl}` },
             };
-        }
+        });
     }
 
     private determineTimezone(lead: Lead): string {
@@ -298,7 +334,7 @@ Refers to the company as "${shortCompany}" to sound natural (e.g. "I saw ${short
             return { success: true, action: 'outreach_batch', message: 'No researched leads pending email generation' };
         }
 
-        console.log(`\n📧 Starting batch email generation for ${leads.length} leads...\n`);
+        logger.info(`Starting batch email generation for ${leads.length} leads...`);
         let successful = 0, failed = 0;
 
         for (const lead of leads) {

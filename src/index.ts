@@ -1,31 +1,41 @@
-// Autonome Sales Agent - Main Entry Point
-import { config } from './config/index.js';
-import { checkConnection } from './db/index.js';
-import { DiscoveryAgent } from './agents/discovery/index.js';
+/**
+ * Autonome Sales Agent - Main Entry Point
+ * 
+ * Starts both the Express server (inbound webhooks) and the Scheduler (pipeline).
+ * This allows single-container deployment on Railway.
+ */
 
-export { DiscoveryAgent } from './agents/discovery/index.js';
-export { leadsDb, eventsDb, supabase } from './db/index.js';
-export { scrapeApollo } from './tools/index.js';
-export type * from './types/index.js';
+import { app } from './inbound-webhook.js';
+import { startScheduler, getSchedulerConfig } from './scheduler.js';
+import { logger, logSuccess } from './utils/logger.js';
+import { config as loadEnv } from 'dotenv';
+loadEnv();
 
-async function main() {
-  console.log('🚀 Autonome Sales Agent Starting...');
-  console.log(`   Environment: ${config.app.nodeEnv}`);
-  
-  // Check database connection
-  const dbConnected = await checkConnection();
-  console.log(`   Database: ${dbConnected ? '✅ Connected' : '❌ Not connected'}`);
-  
-  // Initialize agents
-  const discovery = new DiscoveryAgent();
-  console.log('   Discovery Agent: ✅ Ready');
-  
-  console.log('\n✨ Agent system ready!\n');
-  
-  return { discovery };
+const PORT = process.env.PORT || 3000;
+
+async function start() {
+  console.log(`
+╔═══════════════════════════════════════════════════════════════╗
+║          🚀 AUTONOME AGENT SYSTEM STARTING                    ║
+║                                                               ║
+║  1. Inbound Webhook Server (Port ${PORT})                       ║
+║  2. Sales Pipeline Scheduler (Cron)                           ║
+╚═══════════════════════════════════════════════════════════════╝
+`);
+
+  // 1. Start Web Server
+  app.listen(PORT, () => {
+    logSuccess(`Web Server running on port ${PORT}`);
+  });
+
+  // 2. Start Scheduler
+  const schedulerConfig = getSchedulerConfig();
+  startScheduler(schedulerConfig);
+
+  logger.info('System fully operational');
 }
 
-// Run if executed directly
-if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch(console.error);
-}
+start().catch(error => {
+  logger.error('Failed to start system', { metadata: error });
+  process.exit(1);
+});
