@@ -6,16 +6,8 @@ buildCommand = "npm install"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
 
-[[services]]
-name = "scheduler"
-startCommand = "npm run start:scheduler"
-
-[[services]]
-name = "followups"
-startCommand = "npm run start:followups"
-
-[[services]]
-name = "webhook"
-startCommand = "npm run start:webhook"
+# Single unified service - entry point manages all sub-processes
+[service]
+startCommand = "npm start"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
