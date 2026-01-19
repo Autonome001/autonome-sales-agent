@@ -769,8 +769,8 @@ export async function scrapeApify(params: ApifySearchParams): Promise<ApifyScrap
 
     // Build actor input for pipelinelabs actor
     const actorInput: LeadsFinderInput = {
-      // Total results limit - no cap, use PIPELINE_LIMIT directly
-      totalResults: params.maxResults || 25,
+      // Total results limit - uses PIPELINE_LIMIT (Starter plan supports 1k+ leads)
+      totalResults: params.maxResults || 300,
       // Require email addresses
       hasEmail: true,
       // Job titles - use free text field for custom titles
@@ -868,7 +868,7 @@ export function normalizeSearchParams(params: ApifySearchParams): ApifySearchPar
     jobTitles: params.jobTitles || [],
     seniorities: params.seniorities || [],
     employeeRanges: params.employeeRanges || getEmployeeRangeCodes(20, 200),
-    maxResults: Math.min(params.maxResults ?? 25, 100), // Free tier limit is 100 per run
+    maxResults: params.maxResults ?? 300, // Starter plan supports 1k+ leads per run
   };
 }
 

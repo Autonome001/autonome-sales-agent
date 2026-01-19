@@ -61,8 +61,9 @@ const OPTOUT_BASE_URL = 'https://optout.autonome.us';
 // ============================================================================
 
 interface SchedulerConfig {
-    schedule: string;
-    researchSchedule: string;  // Second daily run for research only
+    schedule: string;           // Full pipeline run 1 (9 AM)
+    schedule2: string;          // Full pipeline run 2 (1 PM)
+    schedule3: string;          // Full pipeline run 3 (5 PM)
     timezone: string;
     limit: number;
     slackWebhookUrl?: string;
@@ -72,7 +73,8 @@ interface SchedulerConfig {
 function getSchedulerConfig(): SchedulerConfig {
     return {
         schedule: process.env.PIPELINE_SCHEDULE || '0 9 * * *',           // Full pipeline at 9 AM
-        researchSchedule: process.env.RESEARCH_SCHEDULE || '0 17 * * *',  // Research-only at 5 PM
+        schedule2: process.env.PIPELINE_SCHEDULE_2 || '0 13 * * *',       // Full pipeline at 1 PM
+        schedule3: process.env.PIPELINE_SCHEDULE_3 || '0 17 * * *',       // Full pipeline at 5 PM
         timezone: process.env.PIPELINE_TIMEZONE || 'America/New_York',
         limit: parseInt(process.env.PIPELINE_LIMIT || '300', 10),
         slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
@@ -602,64 +604,63 @@ function describeCron(expression: string): string {
 function startScheduler(config: SchedulerConfig): void {
     logger.info('📅 Starting Autonome Sales Pipeline Scheduler', { metadata: config });
 
-    if (!cron.validate(config.schedule)) {
-        logger.error('Invalid cron expression', { metadata: { schedule: config.schedule } });
-        process.exit(1);
+    // Validate all 3 cron expressions
+    for (const [name, expr] of [['schedule', config.schedule], ['schedule2', config.schedule2], ['schedule3', config.schedule3]]) {
+        if (!cron.validate(expr)) {
+            logger.error(`Invalid cron expression for ${name}`, { metadata: { schedule: expr } });
+            process.exit(1);
+        }
     }
 
-    if (!cron.validate(config.researchSchedule)) {
-        logger.error('Invalid research cron expression', { metadata: { schedule: config.researchSchedule } });
-        process.exit(1);
-    }
-
-    logger.info(`⏰ Full Pipeline: ${describeCron(config.schedule)}`);
-    logger.info(`🔬 Research Run: ${describeCron(config.researchSchedule)}`);
+    logger.info(`⏰ Full Pipeline 1: ${describeCron(config.schedule)}`);
+    logger.info(`⏰ Full Pipeline 2: ${describeCron(config.schedule2)}`);
+    logger.info(`⏰ Full Pipeline 3: ${describeCron(config.schedule3)}`);
     logger.info(`📧 Senders: ${SENDERS.map(s => s.name).join(', ')}`);
+    logger.info(`🎯 Target: ${config.limit * 3} leads/day (3 × ${config.limit})`);
 
-    // Full pipeline (morning) - discovery, research, outreach, sending
-    const fullPipelineTask = cron.schedule(
+    // Helper to create pipeline runner
+    const createPipelineRunner = (runNumber: number) => async () => {
+        try {
+            logger.info(`Starting scheduled full pipeline run ${runNumber}/3...`);
+            metrics.increment('pipelineRuns');
+            const result = await runPipeline(config.limit);
+            await sendSlackNotification(result, config);
+            logSuccess(`Scheduled full pipeline run ${runNumber}/3 completed`);
+        } catch (error) {
+            logger.error(`Pipeline execution ${runNumber}/3 failed`, { metadata: error });
+            metrics.increment('errorsCaught');
+            await sendSlackNotification({ discovered: 0, researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [error instanceof Error ? error.message : String(error)], quarantineCount: 0, leadsWithErrors: 0 }, config);
+        }
+    };
+
+    // Full pipeline run 1 (morning) - 9 AM
+    const pipelineTask1 = cron.schedule(
         config.schedule,
-        async () => {
-            try {
-                logger.info('Starting scheduled full pipeline run...');
-                metrics.increment('pipelineRuns');
-                const result = await runPipeline(config.limit);
-                await sendSlackNotification(result, config);
-                logSuccess('Scheduled full pipeline run completed');
-            } catch (error) {
-                logger.error('Pipeline execution failed', { metadata: error });
-                metrics.increment('errorsCaught');
-                await sendSlackNotification({ discovered: 0, researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [error instanceof Error ? error.message : String(error)], quarantineCount: 0, leadsWithErrors: 0 }, config);
-            }
-        },
+        createPipelineRunner(1),
         { timezone: config.timezone }
     );
 
-    // Research-only pipeline (afternoon) - processes any scraped leads
-    const researchTask = cron.schedule(
-        config.researchSchedule,
-        async () => {
-            try {
-                logger.info('Starting scheduled research pipeline run...');
-                metrics.increment('pipelineRuns');
-                const result = await runResearchOnlyPipeline(config.limit);
-                await sendSlackNotification(result, config);
-                logSuccess('Scheduled research pipeline run completed');
-            } catch (error) {
-                logger.error('Research pipeline execution failed', { metadata: error });
-                metrics.increment('errorsCaught');
-                await sendSlackNotification({ discovered: 0, researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [error instanceof Error ? error.message : String(error)], quarantineCount: 0, leadsWithErrors: 0 }, config);
-            }
-        },
+    // Full pipeline run 2 (afternoon) - 1 PM
+    const pipelineTask2 = cron.schedule(
+        config.schedule2,
+        createPipelineRunner(2),
         { timezone: config.timezone }
     );
 
-    process.on('SIGINT', () => { fullPipelineTask.stop(); researchTask.stop(); process.exit(0); });
-    process.on('SIGTERM', () => { fullPipelineTask.stop(); researchTask.stop(); process.exit(0); });
+    // Full pipeline run 3 (evening) - 5 PM
+    const pipelineTask3 = cron.schedule(
+        config.schedule3,
+        createPipelineRunner(3),
+        { timezone: config.timezone }
+    );
 
-    logSuccess('Scheduler started with 2 daily runs:');
-    logger.info('   📋 9 AM: Full pipeline (discover → research → outreach → send)');
-    logger.info('   🔬 5 PM: Research only (process any new scraped leads)');
+    process.on('SIGINT', () => { pipelineTask1.stop(); pipelineTask2.stop(); pipelineTask3.stop(); process.exit(0); });
+    process.on('SIGTERM', () => { pipelineTask1.stop(); pipelineTask2.stop(); pipelineTask3.stop(); process.exit(0); });
+
+    logSuccess('Scheduler started with 3 daily FULL pipeline runs:');
+    logger.info('   📋 9 AM:  Full pipeline (discover → research → outreach → send)');
+    logger.info('   📋 1 PM:  Full pipeline (discover → research → outreach → send)');
+    logger.info('   📋 5 PM:  Full pipeline (discover → research → outreach → send)');
     logger.info('Press Ctrl+C to stop');
 }
 
@@ -706,15 +707,17 @@ Options:
   --help, -h     Show this help message
 
 Environment Variables:
-  PIPELINE_SCHEDULE    Cron for full pipeline (default: "0 9 * * *" = 9 AM daily)
-  RESEARCH_SCHEDULE    Cron for research-only run (default: "0 17 * * *" = 5 PM daily)
-  PIPELINE_TIMEZONE    Timezone (default: "America/New_York")
-  PIPELINE_LIMIT       Max leads to discover AND process per stage (default: 10)
-  SLACK_WEBHOOK_URL    Slack webhook for notifications (REQUIRED for alerts!)
+  PIPELINE_SCHEDULE      Cron for full pipeline 1 (default: "0 9 * * *" = 9 AM daily)
+  PIPELINE_SCHEDULE_2    Cron for full pipeline 2 (default: "0 13 * * *" = 1 PM daily)
+  PIPELINE_SCHEDULE_3    Cron for full pipeline 3 (default: "0 17 * * *" = 5 PM daily)
+  PIPELINE_TIMEZONE      Timezone (default: "America/New_York")
+  PIPELINE_LIMIT         Max leads to discover per run (default: 300)
+  SLACK_WEBHOOK_URL      Slack webhook for notifications (REQUIRED for alerts!)
 
-Pipeline Schedules:
+Pipeline Schedules (3x Full Pipelines = ~900 leads/day):
   - 9 AM: Full pipeline (discover → research → outreach → send)
-  - 5 PM: Research only (process any new scraped leads from Slack discovery)
+  - 1 PM: Full pipeline (discover → research → outreach → send)
+  - 5 PM: Full pipeline (discover → research → outreach → send)
 
 Senders Configured:
 ${SENDERS.map(s => `  - ${s.name} (${s.email}) - ${s.title}`).join('\n')}
