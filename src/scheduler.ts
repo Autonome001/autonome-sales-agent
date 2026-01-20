@@ -205,28 +205,94 @@ async function runDiscoveryStage(totalLimit: number, runNumber: number = 1): Pro
         const { scrapeApify } = await import('./tools/apify.js');
         const { leadsDb } = await import('./db/index.js');
 
-        // Forensic Rotation Logic: Using User-provided ICP sets
-        let locations = ['United States'];
-        let industries = ['law', 'legal', 'law practice', 'legal services'];
-        let jobTitles = ['Practice Administrator', 'Operations Director', 'Office Manager', 'Managing Partner', 'Legal Ops'];
+        // =====================================================================
+        // 🔄 10-ICP TRAVELING ROTATION LOGIC
+        // Each ICP travels: Day N (USA) -> Day N+1 (Canada) -> Day N+2 (UK)
+        // =====================================================================
 
-        if (runNumber === 2) {
-            // Run 2 (1 PM): Canada - AgTech and Ag Operations
-            locations = ['Canada'];
-            industries = ['agriculture', 'agronomy', 'farming', 'logistics', 'warehousing'];
-            jobTitles = ['Operations Manager', 'General Manager', 'Logistics Lead', 'Agronomy Services Manager', 'Farm Manager'];
-        } else if (runNumber === 3) {
-            // Run 3 (5 PM): United Kingdom - Marketing Ops and Field Services
-            locations = ['United Kingdom'];
-            industries = ['marketing', 'advertising', 'hvac', 'plumbing', 'electrical', 'property management', 'pest control'];
-            jobTitles = [
-                'Marketing Operations Manager', 'Demand Gen Ops', 'Revenue Ops', 'Client Delivery Ops',
-                'Field Service Operations Manager', 'Service Manager', 'Office Manager', 'Property Management Operations Lead'
-            ];
-        }
+        const TOP_10_ICPS = [
+            {
+                name: "Legal 1: Practice Admin (Small/Mid Law Firm)",
+                industries: ['law', 'legal', 'law practice', 'legal services'],
+                jobTitles: ['Practice Administrator', 'Operations Director', 'Office Manager', 'Legal Ops']
+            },
+            {
+                name: "Legal 2: Managing Partner (Solo/Small Law)",
+                industries: ['law', 'legal services', 'law practice'],
+                jobTitles: ['Managing Partner', 'Owner', 'Principal Attorney']
+            },
+            {
+                name: "Legal 3: Legal Aid / Nonprofit Ops",
+                industries: ['nonprofit', 'legal aid', 'community legal services'],
+                jobTitles: ['Program Operations Manager', 'Executive Director', 'Intake Coordinator']
+            },
+            {
+                name: "Legal 4: Court-adjacent Services",
+                industries: ['mediation services', 'process server', 'court reporting', 'legal services'],
+                jobTitles: ['Operations Manager', 'Owner', 'Office Manager']
+            },
+            {
+                name: "Ag 1: Ag Retailer or Co-op Ops",
+                industries: ['agriculture', 'agronomy', 'farm supply', 'farming'],
+                jobTitles: ['Operations Manager', 'General Manager', 'Logistics Lead', 'Store Manager']
+            },
+            {
+                name: "Ag 2: Farm Manager / GM (Mid-sized Farm)",
+                industries: ['agriculture', 'farming', 'crops', 'livestock'],
+                jobTitles: ['Farm Manager', 'General Manager', 'Operations Manager']
+            },
+            {
+                name: "Ag 3: Ag Logistics & Warehousing",
+                industries: ['logistics', 'warehousing', 'grain storage', 'cold chain'],
+                jobTitles: ['Logistics Coordinator', 'Operations Lead', 'Warehouse Manager']
+            },
+            {
+                name: "Marketing 1: Multi-location Marketing Ops",
+                industries: ['marketing', 'advertising', 'dental', 'med spa', 'home services'],
+                jobTitles: ['Marketing Operations Manager', 'Demand Gen Ops', 'Revenue Ops']
+            },
+            {
+                name: "Marketing 2: Client Delivery Ops (Boutique Agency)",
+                industries: ['marketing agency', 'digital marketing', 'advertising agency'],
+                jobTitles: ['Client Delivery Ops', 'Director of Operations', 'Account Director']
+            },
+            {
+                name: "Services: Field Service Operations",
+                industries: ['hvac', 'plumbing', 'electrical', 'pest control', 'cleaning services'],
+                jobTitles: ['Field Service Operations Manager', 'Service Manager', 'Office Manager', 'Ops Lead']
+            }
+        ];
 
-        logger.info(`   Targeting ICP Set: ${runNumber === 1 ? 'Legal (US)' : runNumber === 2 ? 'AgTech (Canada)' : 'Marketing/Services (UK)'}`);
-        logger.info(`   Filters: Locations=[${locations.join(', ')}], Industries=[${industries.join(', ')}]`);
+        // Calculate stable index based on day of year
+        const now = new Date();
+        const start = new Date(now.getFullYear(), 0, 0);
+        const diff = (now.getTime() - start.getTime()) + ((start.getTimezoneOffset() - now.getTimezoneOffset()) * 60 * 1000);
+        const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
+
+        // Calculation: 
+        // Run 1 (USA): ICP(DayOfYear % 10)
+        // Run 2 (Canada): ICP((DayOfYear - 1) % 10)
+        // Run 3 (UK): ICP((DayOfYear - 2) % 10)
+        // This ensures ICP A is in USA today, Canada tomorrow, UK the day after.
+        const icpIndex = (dayOfYear - (runNumber - 1) + 10) % 10;
+        const currentIcp = TOP_10_ICPS[icpIndex];
+
+        // Fixed Location Slots
+        const locationSlots: Record<number, string[]> = {
+            1: ['United States'],
+            2: ['Canada'],
+            3: ['United Kingdom']
+        };
+
+        const locations = locationSlots[runNumber] || ['United States'];
+        const industries = currentIcp.industries;
+        const jobTitles = currentIcp.jobTitles;
+
+        logger.info(`   🔄 10-ICP Traveling Rotation (Day ${dayOfYear}, Run ${runNumber})`);
+        logger.info(`   🎯 Current Target: ${currentIcp.name}`);
+        logger.info(`   📍 Location: ${locations.join(', ')}`);
+        logger.info(`   💼 Industries: ${industries.join(', ')}`);
+        logger.info(`   👥 Job Titles: ${jobTitles.join(', ')}`);
 
         // Request batch from Apify
         const apifyResult = await scrapeApify({
