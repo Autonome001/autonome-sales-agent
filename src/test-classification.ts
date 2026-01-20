@@ -7,7 +7,7 @@
  */
 
 import { config } from 'dotenv';
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 
 config();
 
@@ -24,12 +24,12 @@ async function classifyEmailReply(
     emailSubject: string,
     fromEmail: string
 ): Promise<EmailReplyClassification> {
-    const anthropicKey = process.env.ANTHROPIC_API_KEY;
-    if (!anthropicKey) {
-        throw new Error('ANTHROPIC_API_KEY not configured');
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (!openaiKey) {
+        throw new Error('OPENAI_API_KEY not configured');
     }
 
-    const anthropic = new Anthropic({ apiKey: anthropicKey });
+    const openai = new OpenAI({ apiKey: openaiKey });
 
     const prompt = `You are an expert email reply classifier for a B2B sales automation system.
 
@@ -57,17 +57,17 @@ Provide your classification in JSON format:
 
 Be conservative - if you're not sure, classify as "question" so a human can review.`;
 
-    const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
+    const response = await openai.chat.completions.create({
+        model: 'gpt-4o',
         messages: [{ role: 'user', content: prompt }],
+        response_format: { type: "json_object" },
     });
 
-    const text = response.content[0].type === 'text' ? response.content[0].text : '';
+    const text = response.choices[0].message.content || '{}';
     const jsonMatch = text.match(/\{[\s\S]*\}/);
 
     if (!jsonMatch) {
-        throw new Error('Failed to parse classification response');
+        return JSON.parse(text);
     }
 
     return JSON.parse(jsonMatch[0]);

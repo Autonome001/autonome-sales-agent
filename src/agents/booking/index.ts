@@ -1,5 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { anthropicConfig } from '../../config/index.js';
+import OpenAI from 'openai';
+import { openaiConfig } from '../../config/index.js';
 import { leadsDb, eventsDb } from '../../db/index.js';
 import type { Lead, AgentResult } from '../../types/index.js';
 import { logger, logSuccess } from '../../utils/logger.js';
@@ -21,12 +21,12 @@ export interface BookingConfig {
 }
 
 export class BookingAgent {
-    private claude: Anthropic;
+    private openai: OpenAI;
     private config: BookingConfig;
 
     constructor(config?: Partial<BookingConfig>) {
-        this.claude = new Anthropic({
-            apiKey: anthropicConfig.apiKey,
+        this.openai = new OpenAI({
+            apiKey: openaiConfig.apiKey,
         });
 
         this.config = {
@@ -153,11 +153,10 @@ export class BookingAgent {
 
         const shortCompany = this.cleanCompanyName(lead.company_name || '');
 
-        const response = await this.claude.messages.create({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 1024,
-            system: `You are writing a brief, warm meeting confirmation email. Keep it under 75 words. Be friendly and professional. Include the meeting details clearly. Refer to the company naturally as "${shortCompany}".`,
+        const response = await this.openai.chat.completions.create({
+            model: 'gpt-4o',
             messages: [
+                { role: 'system', content: `You are writing a brief, warm meeting confirmation email. Keep it under 75 words. Be friendly and professional. Include the meeting details clearly. Refer to the company naturally as "${shortCompany}".` },
                 {
                     role: 'user',
                     content: `Write a confirmation email to ${lead.first_name} for our meeting scheduled on ${meetingDate.toLocaleString()}. Their company is ${shortCompany}. Meeting link: ${lead.meeting_link || '[MEETING_LINK]'}`,
@@ -165,7 +164,7 @@ export class BookingAgent {
             ],
         });
 
-        const confirmationText = response.content[0].type === 'text' ? response.content[0].text : '';
+        const confirmationText = response.choices[0].message.content || '';
 
         await eventsDb.log({
             lead_id: lead.id,
@@ -212,11 +211,10 @@ export class BookingAgent {
         const meetingDate = new Date(lead.meeting_scheduled_at);
         const timeUntil = hoursBefore === 1 ? 'in 1 hour' : `tomorrow`;
 
-        const response = await this.claude.messages.create({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 512,
-            system: `You are writing a brief meeting reminder email. Keep it under 50 words. Be friendly and include the meeting link.`,
+        const response = await this.openai.chat.completions.create({
+            model: 'gpt-4o',
             messages: [
+                { role: 'system', content: `You are writing a brief meeting reminder email. Keep it under 50 words. Be friendly and include the meeting link.` },
                 {
                     role: 'user',
                     content: `Write a reminder to ${lead.first_name} that our meeting is ${timeUntil} at ${meetingDate.toLocaleTimeString()}. Meeting link: ${lead.meeting_link || '[MEETING_LINK]'}`,
@@ -224,7 +222,7 @@ export class BookingAgent {
             ],
         });
 
-        const reminderText = response.content[0].type === 'text' ? response.content[0].text : '';
+        const reminderText = response.choices[0].message.content || '';
 
         console.log('\n📧 Generated Reminder:\n');
         console.log(reminderText);

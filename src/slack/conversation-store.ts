@@ -5,7 +5,7 @@
  * continuous, multi-turn conversations with the AI agent.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 
 // =============================================================================
 // Types
@@ -112,11 +112,11 @@ export function addMessage(
 export function getMessagesForClaude(
     channelId: string,
     threadTs: string
-): Anthropic.Messages.MessageParam[] {
+): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
     const conversation = getOrCreateConversation(channelId, threadTs);
 
     return conversation.messages.map(msg => ({
-        role: msg.role,
+        role: msg.role as 'user' | 'assistant' | 'system',
         content: msg.content,
     }));
 }

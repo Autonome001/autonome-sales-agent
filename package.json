@@ -33,11 +33,11 @@
     "start:webhook": "node dist/inbound-webhook.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.52.0",
     "@supabase/supabase-js": "^2.49.1",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "node-cron": "^4.2.1",
+    "openai": "^6.16.0",
     "resend": "^4.0.1",
     "winston": "^3.19.0",
     "zod": "^3.24.1"

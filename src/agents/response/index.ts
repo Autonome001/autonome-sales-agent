@@ -1,5 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { anthropicConfig } from '../../config/index.js';
+import OpenAI from 'openai';
+import { openaiConfig } from '../../config/index.js';
 import { leadsDb, eventsDb } from '../../db/index.js';
 import type { Lead, AgentResult } from '../../types/index.js';
 import { logger, logSuccess } from '../../utils/logger.js';
@@ -61,11 +61,11 @@ OUTPUT FORMAT (JSON):
 Be accurate. Misclassifying an interested lead as not interested loses business. Misclassifying not interested as interested wastes time.`;
 
 export class ResponseAgent {
-    private claude: Anthropic;
+    private openai: OpenAI;
 
     constructor() {
-        this.claude = new Anthropic({
-            apiKey: anthropicConfig.apiKey,
+        this.openai = new OpenAI({
+            apiKey: openaiConfig.apiKey,
         });
     }
 
@@ -160,15 +160,15 @@ export class ResponseAgent {
         const { bookingAgent } = await import('../booking/index.js');
         const { config } = await import('../../config/index.js');
 
-        const response = await this.claude.messages.create({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 1024,
-            system: `You are a helpful sales assistant. The prospect has expressed interest in a meeting. 
+        const response = await this.openai.chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+                {
+                    role: 'system', content: `You are a helpful sales assistant. The prospect has expressed interest in a meeting. 
             Your goal is to get them to book a time or confirm a proposed time.
             Keep the tone professional but friendly. 
             Use the context of their email.
-            Include the scheduling link: https://calendly.com/autonome/15min`,
-            messages: [
+            Include the scheduling link: https://calendly.com/autonome/15min` },
                 {
                     role: 'user',
                     content: `Prospect said: "${email.body}".\n\nDraft a reply to ${lead.first_name} to schedule the call.`
@@ -176,7 +176,7 @@ export class ResponseAgent {
             ]
         });
 
-        const draftReply = response.content[0].type === 'text' ? response.content[0].text : '';
+        const draftReply = response.choices[0].message.content || '';
 
         await bookingAgent.requestHumanReview(
             lead.id,
@@ -196,19 +196,19 @@ BODY:
 ${email.body}
 `;
 
-        const response = await this.claude.messages.create({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 1024,
-            system: CLASSIFICATION_SYSTEM_PROMPT,
+        const response = await this.openai.chat.completions.create({
+            model: 'gpt-4o',
             messages: [
+                { role: 'system', content: CLASSIFICATION_SYSTEM_PROMPT },
                 {
                     role: 'user',
                     content: `Classify this inbound email response:\n\n${emailContext}`,
                 },
             ],
+            response_format: { type: "json_object" },
         });
 
-        const responseText = response.content[0].type === 'text' ? response.content[0].text : '';
+        const responseText = response.choices[0].message.content || '';
 
         try {
             const jsonMatch = responseText.match(/\{[\s\S]*\}/);
@@ -267,11 +267,10 @@ ${email.body}
 
         console.log(`\n✍️  Generating follow-up for: ${lead.first_name} ${lead.last_name}`);
 
-        const response = await this.claude.messages.create({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 1024,
-            system: `You are writing a warm follow-up email to someone who responded positively to cold outreach. Keep it brief (under 75 words), friendly, and focused on scheduling a call. Include a Calendly link placeholder: [CALENDLY_LINK]`,
+        const response = await this.openai.chat.completions.create({
+            model: 'gpt-4o',
             messages: [
+                { role: 'system', content: `You are writing a warm follow-up email to someone who responded positively to cold outreach. Keep it brief (under 75 words), friendly, and focused on scheduling a call. Include a Calendly link placeholder: [CALENDLY_LINK]` },
                 {
                     role: 'user',
                     content: `Write a follow-up to ${lead.first_name} who showed interest. Their company is ${lead.company_name || 'their company'}. Keep it warm and get them to book a call.`,
@@ -279,7 +278,7 @@ ${email.body}
             ],
         });
 
-        const followUpText = response.content[0].type === 'text' ? response.content[0].text : '';
+        const followUpText = response.choices[0].message.content || '';
 
         await eventsDb.log({
             lead_id: lead.id,

@@ -8,8 +8,8 @@
  * - Remember context across messages in a thread
  */
 
-import Anthropic from '@anthropic-ai/sdk';
-import { anthropicConfig } from '../config/index.js';
+import OpenAI from 'openai';
+import { openaiConfig } from '../config/index.js';
 import { leadsDb, eventsDb } from '../db/index.js';
 import { scrapeApollo, normalizeSearchParams, buildEmployeeRanges, type ApolloSearchParams } from '../tools/apify.js';
 import { researchAgent } from '../agents/research/index.js';
@@ -134,11 +134,11 @@ Response: {
 // =============================================================================
 
 export class ConversationalAgent {
-    private claude: Anthropic;
+    private openai: OpenAI;
 
     constructor() {
-        this.claude = new Anthropic({
-            apiKey: anthropicConfig.apiKey,
+        this.openai = new OpenAI({
+            apiKey: openaiConfig.apiKey,
         });
     }
 
@@ -158,17 +158,16 @@ export class ConversationalAgent {
             // Get conversation history
             const messages = getMessagesForClaude(channelId, threadTs);
 
-            // Get Claude's response
-            const response = await this.claude.messages.create({
-                model: 'claude-sonnet-4-20250514',
-                max_tokens: 2048,
-                system: SYSTEM_PROMPT,
-                messages: messages,
+            // Get OpenAI's response
+            const response = await this.openai.chat.completions.create({
+                model: 'gpt-4o',
+                messages: [
+                    { role: 'system', content: SYSTEM_PROMPT },
+                    ...messages
+                ],
             });
 
-            const assistantMessage = response.content[0].type === 'text'
-                ? response.content[0].text
-                : '';
+            const assistantMessage = response.choices[0].message.content || '';
 
             // Parse the response to check for actions
             const parsed = this.parseResponse(assistantMessage);

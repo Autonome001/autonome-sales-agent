@@ -1,5 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { anthropicConfig } from '../../config/index.js';
+import OpenAI from 'openai';
+import { openaiConfig } from '../../config/index.js';
 import { leadsDb, eventsDb } from '../../db/index.js';
 import { scrapeApollo, normalizeSearchParams, type ApolloSearchParams } from '../../tools/apify.js';
 import type { DiscoveryQuery, DiscoveryResult, AgentResult, Lead } from '../../types/index.js';
@@ -32,12 +32,12 @@ Output your response as JSON:
 }`;
 
 export class DiscoveryAgent {
-  private claude: Anthropic;
-  private conversationHistory: Anthropic.Messages.MessageParam[] = [];
+  private openai: OpenAI;
+  private conversationHistory: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
 
   constructor() {
-    this.claude = new Anthropic({
-      apiKey: anthropicConfig.apiKey,
+    this.openai = new OpenAI({
+      apiKey: openaiConfig.apiKey,
     });
   }
 
@@ -59,17 +59,16 @@ export class DiscoveryAgent {
     });
 
     try {
-      // Get Claude's interpretation
-      const response = await this.claude.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
-        system: SYSTEM_PROMPT,
-        messages: this.conversationHistory,
+      // Get OpenAI's interpretation
+      const response = await this.openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          ...this.conversationHistory
+        ],
       });
 
-      const assistantMessage = response.content[0].type === 'text'
-        ? response.content[0].text
-        : '';
+      const assistantMessage = response.choices[0].message.content || '';
 
       // Add assistant response to history
       this.conversationHistory.push({
