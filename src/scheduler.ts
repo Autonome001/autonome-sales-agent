@@ -207,59 +207,81 @@ async function runDiscoveryStage(totalLimit: number, runNumber: number = 1): Pro
 
         // =====================================================================
         // 🔄 10-ICP TRAVELING ROTATION LOGIC
+        // =====================================================================
+        // 🔄 14-ICP TRAVELING ROTATION LOGIC
         // Each ICP travels: Day N (USA) -> Day N+1 (Canada) -> Day N+2 (UK)
         // =====================================================================
 
-        const TOP_10_ICPS = [
+        const ALL_ICPS = [
             {
-                name: "Legal 1: Practice Admin (Small/Mid Law Firm)",
-                industries: ['law', 'legal', 'law practice', 'legal services'],
+                name: "ICP 0: Tech/SaaS CEOs/Founders",
+                industries: ['technology', 'software', 'saas'],
+                jobTitles: ['CEO', 'Founder', 'Co-Founder', 'President']
+            },
+            {
+                name: "ICP 1: Legal - Practice Admin (Small/Mid Law Firm)",
+                industries: ['law', 'legal practice', 'legal services'],
                 jobTitles: ['Practice Administrator', 'Operations Director', 'Office Manager', 'Legal Ops']
             },
             {
-                name: "Legal 2: Managing Partner (Solo/Small Law)",
-                industries: ['law', 'legal services', 'law practice'],
+                name: "ICP 2: Legal - Managing Partner (Solo/Small Law)",
+                industries: ['law', 'legal services'],
                 jobTitles: ['Managing Partner', 'Owner', 'Principal Attorney']
             },
             {
-                name: "Legal 3: Legal Aid / Nonprofit Ops",
+                name: "ICP 3: Legal - Legal Aid / Nonprofit Ops",
                 industries: ['nonprofit', 'legal aid', 'community legal services'],
                 jobTitles: ['Program Operations Manager', 'Executive Director', 'Intake Coordinator']
             },
             {
-                name: "Legal 4: Court-adjacent Services",
+                name: "ICP 4: Legal - Court-adjacent Services",
                 industries: ['mediation services', 'process server', 'court reporting', 'legal services'],
                 jobTitles: ['Operations Manager', 'Owner', 'Office Manager']
             },
             {
-                name: "Ag 1: Ag Retailer or Co-op Ops",
+                name: "ICP 5: Ag - Ag Retailer or Co-op Ops",
                 industries: ['agriculture', 'agronomy', 'farm supply', 'farming'],
                 jobTitles: ['Operations Manager', 'General Manager', 'Logistics Lead', 'Store Manager']
             },
             {
-                name: "Ag 2: Farm Manager / GM (Mid-sized Farm)",
+                name: "ICP 6: Ag - Farm Manager / GM (Mid-sized Farm)",
                 industries: ['agriculture', 'farming', 'crops', 'livestock'],
                 jobTitles: ['Farm Manager', 'General Manager', 'Operations Manager']
             },
             {
-                name: "Ag 3: Ag Logistics & Warehousing",
-                industries: ['logistics', 'warehousing', 'grain storage', 'cold chain'],
-                jobTitles: ['Logistics Coordinator', 'Operations Lead', 'Warehouse Manager']
+                name: "ICP 7: Ag - Ag Logistics & Warehousing",
+                industries: ['logistics', 'warehousing', 'grain storage', 'cold chain', 'packhouse'],
+                jobTitles: ['Logistics Coordinator', 'Operations Lead', 'Warehouse Manager', 'Shipping Coordinator']
             },
             {
-                name: "Marketing 1: Multi-location Marketing Ops",
+                name: "ICP 8: Ag - Agronomy Consulting & Field Services",
+                industries: ['agronomy', 'agriculture consulting', 'field services'],
+                jobTitles: ['Operations Lead', 'Agronomy Services Manager', 'Field Services Manager']
+            },
+            {
+                name: "ICP 9: Marketing - Multi-location Marketing Ops",
                 industries: ['marketing', 'advertising', 'dental', 'med spa', 'home services'],
                 jobTitles: ['Marketing Operations Manager', 'Demand Gen Ops', 'Revenue Ops']
             },
             {
-                name: "Marketing 2: Client Delivery Ops (Boutique Agency)",
+                name: "ICP 10: Marketing - Client Delivery Ops (Boutique Agency)",
                 industries: ['marketing agency', 'digital marketing', 'advertising agency'],
                 jobTitles: ['Client Delivery Ops', 'Director of Operations', 'Account Director']
             },
             {
-                name: "Services: Field Service Operations",
-                industries: ['hvac', 'plumbing', 'electrical', 'pest control', 'cleaning services'],
+                name: "ICP 11: Services - Field Service Operations",
+                industries: ['hvac', 'plumbing', 'electrical', 'pest control', 'cleaning services', 'security installers'],
                 jobTitles: ['Field Service Operations Manager', 'Service Manager', 'Office Manager', 'Ops Lead']
+            },
+            {
+                name: "ICP 12: Services - Professional Services Office Manager",
+                industries: ['accounting', 'consulting', 'insurance agency'],
+                jobTitles: ['Office Manager', 'Administrator', 'Operations Manager']
+            },
+            {
+                name: "ICP 13: Services - Property Management Ops",
+                industries: ['property management', 'real estate services'],
+                jobTitles: ['Operations Lead', 'Property Manager', 'Site Manager', 'Maintenance Coordinator']
             }
         ];
 
@@ -270,12 +292,12 @@ async function runDiscoveryStage(totalLimit: number, runNumber: number = 1): Pro
         const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
 
         // Calculation: 
-        // Run 1 (USA): ICP(DayOfYear % 10)
-        // Run 2 (Canada): ICP((DayOfYear - 1) % 10)
-        // Run 3 (UK): ICP((DayOfYear - 2) % 10)
+        // Run 1 (USA): ICP((DayOfYear - 0) % 14)
+        // Run 2 (Canada): ICP((DayOfYear - 1) % 14)
+        // Run 3 (UK): ICP((DayOfYear - 2) % 14)
         // This ensures ICP A is in USA today, Canada tomorrow, UK the day after.
-        const icpIndex = (dayOfYear - (runNumber - 1) + 10) % 10;
-        const currentIcp = TOP_10_ICPS[icpIndex];
+        const icpIndex = (dayOfYear - (runNumber - 1) + 14) % 14;
+        const currentIcp = ALL_ICPS[icpIndex];
 
         // Fixed Location Slots
         const locationSlots: Record<number, string[]> = {
@@ -288,7 +310,7 @@ async function runDiscoveryStage(totalLimit: number, runNumber: number = 1): Pro
         const industries = currentIcp.industries;
         const jobTitles = currentIcp.jobTitles;
 
-        logger.info(`   🔄 10-ICP Traveling Rotation (Day ${dayOfYear}, Run ${runNumber})`);
+        logger.info(`   🔄 14-ICP Traveling Rotation (Day ${dayOfYear}, Run ${runNumber})`);
         logger.info(`   🎯 Current Target: ${currentIcp.name}`);
         logger.info(`   📍 Location: ${locations.join(', ')}`);
         logger.info(`   💼 Industries: ${industries.join(', ')}`);
