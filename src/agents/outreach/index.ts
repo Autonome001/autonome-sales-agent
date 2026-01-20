@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropicConfig } from '../../config/index.js';
+import { PERSONAS } from '../../config/personas.js';
 import { leadsDb, eventsDb } from '../../db/index.js';
 import type { Lead, AgentResult } from '../../types/index.js';
 import { withRetry } from '../../utils/retry.js';
@@ -107,11 +108,9 @@ export class OutreachAgent {
         });
 
         this.config = {
-            senderEmails: config?.senderEmails || [
-                process.env.SENDER_EMAIL_1 || 'brian@autonomepartners.ai',
-                process.env.SENDER_EMAIL_2 || 'cole@autonomepartners.ai',
-                process.env.SENDER_EMAIL_3 || 'melle@autonomepartners.ai',
-            ],
+            // Import at top of file needed, but I can't add imports with multi_replace easily if they are far away.
+            // I will replace the constructor logic to map from PERSONAS
+            senderEmails: config?.senderEmails || PERSONAS.map(p => p.email),
             optOutBaseUrl: config?.optOutBaseUrl || process.env.OPT_OUT_URL || 'https://autonomepartners.ai/optout',
             calendlyUrl: config?.calendlyUrl || process.env.CALENDLY_URL || 'https://calendly.com/autonome/15min',
         };

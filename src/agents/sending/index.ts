@@ -4,6 +4,7 @@ import type { Lead, AgentResult } from '../../types/index.js';
 import { withRetry } from '../../utils/retry.js';
 import { logger, logSuccess } from '../../utils/logger.js';
 import { metrics } from '../../utils/metrics.js';
+import { PERSONAS, GET_PERSONA_BY_EMAIL } from '../../config/personas.js';
 export interface SendingConfig {
     resendApiKey: string;
     defaultSenderEmail: string;
@@ -91,7 +92,7 @@ export class SendingAgent {
     /**
      * Send email via Resend API (with retry)
      */
-    private async sendViaResend(email: EmailToSend): Promise<SendResult> {
+    private async sendViaResend(email: EmailToSend, senderProfile?: { name: string, email: string }): Promise<SendResult> {
         if (!this.resend) {
             return { success: false, error: 'Resend API key not configured' };
         }
@@ -102,7 +103,9 @@ export class SendingAgent {
 
         return withRetry(
             async () => {
-                const fromAddress = `${config.defaultSenderName} <${config.defaultSenderEmail}>`;
+                const fromName = senderProfile?.name || config.defaultSenderName;
+                const fromEmail = senderProfile?.email || config.defaultSenderEmail;
+                const fromAddress = `${fromName} <${fromEmail}>`;
                 const htmlBody = email.htmlBody || textToHtmlFn(email.body);
                 const textBody = email.body.replace(/<[^>]*>/g, ''); // Strip HTML for text version
 
@@ -155,11 +158,25 @@ export class SendingAgent {
 
         logger.info(`Sending custom email to: ${lead.email}`, { metadata: { subject } });
 
+        // Determine sender
+        let senderProfile = {
+            name: this.config.defaultSenderName,
+            email: this.config.defaultSenderEmail,
+            title: 'Solutions Consultant'
+        };
+        if (lead.sender_email) {
+            const persona = GET_PERSONA_BY_EMAIL(lead.sender_email);
+            if (persona) senderProfile = persona;
+        }
+
+        const signature = `\n\nBest,\n\n${senderProfile.name}\n${senderProfile.title}\nAutonome`;
+        const bodyWithSignature = body + signature;
+
         const result = await this.sendViaResend({
             to: lead.email,
             subject: subject,
-            body: body,
-        });
+            body: bodyWithSignature,
+        }, senderProfile);
 
         if (result.success) {
             metrics.increment('emailsSent');
@@ -194,31 +211,52 @@ export class SendingAgent {
             return { success: false, action: 'send_email_1', message: 'Email 1 not generated', error: 'Missing email content' };
         }
 
+        // Determine sender
+        let senderProfile = {
+            name: this.config.defaultSenderName,
+            email: this.config.defaultSenderEmail,
+            title: 'Solutions Consultant'
+        };
+
+        if (lead.sender_email) {
+            const persona = GET_PERSONA_BY_EMAIL(lead.sender_email);
+            if (persona) {
+                senderProfile = persona;
+            } else {
+                // If assigned sender is not in config, try to use it anyway with default name, or fallback?
+                // Better to just use it if it looks valid, or fallback to default.
+                logger.warn(`Assigned sender ${lead.sender_email} not found in config, using defaults`);
+            }
+        }
+
+        const signature = `\n\nBest,\n\n${senderProfile.name}\n${senderProfile.title}\nAutonome`;
+        const bodyWithSignature = lead.email_1_body + signature;
+
         logger.info(`Sending Email 1 to: ${lead.email}`, {
             metadata: {
                 subject: lead.email_1_subject,
-                sender: this.config.defaultSenderEmail
+                sender: senderProfile.email
             }
         });
 
         const result = await this.sendViaResend({
             to: lead.email,
             subject: lead.email_1_subject,
-            body: lead.email_1_body,
-        });
+            body: bodyWithSignature,
+        }, senderProfile);
 
         if (result.success) {
             await leadsDb.update(lead.id, {
                 status: 'email_1_sent',
                 email_1_sent_at: new Date().toISOString(),
                 email_1_message_id: result.messageId,
-                sender_email: this.config.defaultSenderEmail,
+                sender_email: senderProfile.email,
             });
 
             await eventsDb.log({
                 lead_id: lead.id,
                 event_type: 'email_1_sent',
-                event_data: { messageId: result.messageId, sender: this.config.defaultSenderEmail },
+                event_data: { messageId: result.messageId, sender: senderProfile.email },
             });
 
             return { success: true, action: 'send_email_1', message: `Email 1 sent to ${lead.email}`, data: { messageId: result.messageId } };
@@ -254,12 +292,26 @@ export class SendingAgent {
 
         console.log(`   📤 Sending follow-up to: ${lead.email}`);
 
+        // Determine sender (same as Email 1)
+        let senderProfile = {
+            name: this.config.defaultSenderName,
+            email: this.config.defaultSenderEmail,
+            title: 'Solutions Consultant'
+        };
+        if (lead.sender_email) {
+            const persona = GET_PERSONA_BY_EMAIL(lead.sender_email);
+            if (persona) senderProfile = persona;
+        }
+
+        const signature = `\n\nBest,\n\n${senderProfile.name}\n${senderProfile.title}\nAutonome`;
+        const bodyWithSignature = lead.email_2_body + signature;
+
         const subject = `Re: ${lead.email_1_subject}`;
         const result = await this.sendViaResend({
             to: lead.email,
             subject: subject,
-            body: lead.email_2_body,
-        });
+            body: bodyWithSignature,
+        }, senderProfile);
 
         if (result.success) {
             await leadsDb.update(lead.id, {
@@ -305,11 +357,25 @@ export class SendingAgent {
 
         console.log(`   📤 Sending final email to: ${lead.email}`);
 
+        // Determine sender
+        let senderProfile = {
+            name: this.config.defaultSenderName,
+            email: this.config.defaultSenderEmail,
+            title: 'Solutions Consultant'
+        };
+        if (lead.sender_email) {
+            const persona = GET_PERSONA_BY_EMAIL(lead.sender_email);
+            if (persona) senderProfile = persona;
+        }
+
+        const signature = `\n\nBest,\n\n${senderProfile.name}\n${senderProfile.title}\nAutonome`;
+        const bodyWithSignature = lead.email_3_body + signature;
+
         const result = await this.sendViaResend({
             to: lead.email,
             subject: lead.email_3_subject,
-            body: lead.email_3_body,
-        });
+            body: bodyWithSignature,
+        }, senderProfile);
 
         if (result.success) {
             await leadsDb.update(lead.id, {

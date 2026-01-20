@@ -20,20 +20,7 @@ import { leadsDb, eventsDb } from './db/index.js';
 import { outreachAgent } from './agents/outreach/index.js';
 import { sendingAgent } from './agents/sending/index.js';
 import { Lead } from './types/index.js';
-
-config();
-
-// ============================================================================
-// Sender Configuration
-// ============================================================================
-
-interface Sender {
-    email: string;
-    name: string;
-    title: string;
-}
-
-
+import { PERSONAS, Persona } from './config/personas.js';
 import { ICP } from './config/icp.js';
 import { discoveryAgent } from './agents/discovery/index.js';
 import { researchAgent } from './agents/research/index.js';
@@ -41,14 +28,16 @@ import { buildEmployeeRanges } from './tools/apify.js';
 import { logger, logSuccess } from './utils/logger.js';
 import { metrics } from './utils/metrics.js';
 
+config();
+
+// ============================================================================
+// Sender Configuration
+// ============================================================================
+
+
+
 // Autonome Sales Team Senders
-const SENDERS: Sender[] = [
-    { email: 'brian@autonome.us', name: 'Brian P.', title: 'Solutions Consultant' },
-    { email: 'crystal@autonome.us', name: 'Crystal R.', title: 'Director of Client Services & Automation Strategy' },
-    { email: 'johnnie@autonome.us', name: 'Johnnie T.', title: 'Account Executive' },
-    { email: 'kevin@autonome.us', name: 'Kevin J.', title: 'Director of Partnerships' },
-    { email: 'jonathan@autonome.us', name: 'Jonathan R.', title: 'Account Executive' },
-];
+const SENDERS = PERSONAS;
 
 // Booking link
 const BOOKING_URL = 'https://calendar.google.com/calendar/u/0/appointments/schedules/AcZssZ37C4OHXBuDpQ79wsup6S8hiKCIgHQaRFi_uMHIChLa-KUzEvvbV4Qjv0NigQi5q8YodqVuC1vU';
