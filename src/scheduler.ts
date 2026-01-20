@@ -15,7 +15,7 @@
 import cron from 'node-cron';
 import { config } from 'dotenv';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { leadsDb, eventsDb } from './db/index.js';
 import { outreachAgent } from './agents/outreach/index.js';
 import { sendingAgent } from './agents/sending/index.js';
@@ -198,18 +198,41 @@ async function sendSlackNotification(
  * Strategy: Request full batch (300 leads = ~3 min scrape time)
  * Batch size is small enough to avoid timeouts without chunking
  */
-async function runDiscoveryStage(totalLimit: number): Promise<number> {
-    logger.info(`🔎 DISCOVERY STAGE - Target: ${totalLimit} leads`);
+async function runDiscoveryStage(totalLimit: number, runNumber: number = 1): Promise<number> {
+    logger.info(`🔎 DISCOVERY STAGE (Run ${runNumber}) - Target: ${totalLimit} leads`);
 
     try {
         const { scrapeApify } = await import('./tools/apify.js');
         const { leadsDb } = await import('./db/index.js');
 
-        // Request full batch from Apify
+        // Forensic Rotation Logic: Using User-provided ICP sets
+        let locations = ['United States'];
+        let industries = ['law', 'legal', 'law practice', 'legal services'];
+        let jobTitles = ['Practice Administrator', 'Operations Director', 'Office Manager', 'Managing Partner', 'Legal Ops'];
+
+        if (runNumber === 2) {
+            // Run 2 (1 PM): Canada - AgTech and Ag Operations
+            locations = ['Canada'];
+            industries = ['agriculture', 'agronomy', 'farming', 'logistics', 'warehousing'];
+            jobTitles = ['Operations Manager', 'General Manager', 'Logistics Lead', 'Agronomy Services Manager', 'Farm Manager'];
+        } else if (runNumber === 3) {
+            // Run 3 (5 PM): United Kingdom - Marketing Ops and Field Services
+            locations = ['United Kingdom'];
+            industries = ['marketing', 'advertising', 'hvac', 'plumbing', 'electrical', 'property management', 'pest control'];
+            jobTitles = [
+                'Marketing Operations Manager', 'Demand Gen Ops', 'Revenue Ops', 'Client Delivery Ops',
+                'Field Service Operations Manager', 'Service Manager', 'Office Manager', 'Property Management Operations Lead'
+            ];
+        }
+
+        logger.info(`   Targeting ICP Set: ${runNumber === 1 ? 'Legal (US)' : runNumber === 2 ? 'AgTech (Canada)' : 'Marketing/Services (UK)'}`);
+        logger.info(`   Filters: Locations=[${locations.join(', ')}], Industries=[${industries.join(', ')}]`);
+
+        // Request batch from Apify
         const apifyResult = await scrapeApify({
-            locations: ['United States'],
-            industries: ['technology', 'software', 'saas'],
-            jobTitles: ['CEO', 'Founder', 'CTO', 'VP'],
+            locations,
+            industries,
+            jobTitles,
             maxResults: totalLimit,
         });
 
@@ -297,7 +320,7 @@ async function getFollowUpStats(supabase: SupabaseClient): Promise<{
 // Stage 1: Research
 // ============================================================================
 
-async function runResearchStage(supabase: SupabaseClient, anthropic: Anthropic, limit: number): Promise<number> {
+async function runResearchStage(supabase: SupabaseClient, limit: number): Promise<number> {
     logger.info('STAGE 1: RESEARCH');
 
     const result = await researchAgent.researchPendingLeads(limit);
@@ -320,7 +343,7 @@ async function runResearchStage(supabase: SupabaseClient, anthropic: Anthropic, 
 // Stage 2: Outreach
 // ============================================================================
 
-async function runOutreachStage(supabase: SupabaseClient, anthropic: Anthropic, limit: number): Promise<number> {
+async function runOutreachStage(supabase: SupabaseClient, limit: number): Promise<number> {
     logger.info('STAGE 2: OUTREACH (Email Generation)');
 
     const leads = await leadsDb.findByStatus('researched', limit);
@@ -392,7 +415,7 @@ async function runSendingStage(supabase: SupabaseClient, limit: number): Promise
 // Main Pipeline
 // ============================================================================
 
-async function runPipeline(limit: number): Promise<PipelineResult> {
+async function runPipeline(limit: number, runNumber: number = 1): Promise<PipelineResult> {
     const startTime = Date.now();
     const errors: string[] = [];
 
@@ -405,14 +428,14 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
     const supabaseUrl = process.env.SUPABASE_URL;
     // Use service role key to bypass RLS - important for backend operations
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const openaiKey = process.env.OPENAI_API_KEY;
 
-    if (!supabaseUrl || !supabaseKey || !anthropicKey) {
+    if (!supabaseUrl || !supabaseKey || !openaiKey) {
         throw new Error('Missing required environment variables');
     }
 
     const supabase = createClient(supabaseUrl, supabaseKey);
-    const anthropic = new Anthropic({ apiKey: anthropicKey });
+    // Agents initialize their own OpenAI clients using config
 
     // Test connection
     try {
@@ -432,7 +455,7 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
     let discovered = 0, researched = 0, emailsCreated = 0, emailsSent = 0;
 
     // Stage 0: Discovery - find new leads
-    try { discovered = await runDiscoveryStage(limit); }
+    try { discovered = await runDiscoveryStage(limit, runNumber); }
     catch (error) {
         const msg = `Discovery: ${error instanceof Error ? error.message : String(error)}`;
         errors.push(msg);
@@ -441,7 +464,7 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
     }
 
     // Stage 1: Research - process ALL scraped leads (including newly discovered)
-    try { researched = await runResearchStage(supabase, anthropic, limit); }
+    try { researched = await runResearchStage(supabase, limit); }
     catch (error) {
         const msg = `Research: ${error instanceof Error ? error.message : String(error)}`;
         errors.push(msg);
@@ -450,7 +473,7 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
     }
 
     // Stage 2: Outreach - process ALL researched leads (including newly researched)
-    try { emailsCreated = await runOutreachStage(supabase, anthropic, limit); }
+    try { emailsCreated = await runOutreachStage(supabase, limit); }
     catch (error) {
         const msg = `Outreach: ${error instanceof Error ? error.message : String(error)}`;
         errors.push(msg);
@@ -517,7 +540,7 @@ async function runPipeline(limit: number): Promise<PipelineResult> {
 // Research-Only Pipeline (for second daily run)
 // ============================================================================
 
-async function runResearchOnlyPipeline(limit: number): Promise<PipelineResult> {
+async function runResearchOnlyPipeline(limit: number, runNumber: number = 1): Promise<PipelineResult> {
     const startTime = Date.now();
     const errors: string[] = [];
 
@@ -530,14 +553,13 @@ async function runResearchOnlyPipeline(limit: number): Promise<PipelineResult> {
     const supabaseUrl = process.env.SUPABASE_URL;
     // Use service role key to bypass RLS - important for backend operations
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    const openaiKey = process.env.OPENAI_API_KEY;
 
-    if (!supabaseUrl || !supabaseKey || !anthropicKey) {
+    if (!supabaseUrl || !supabaseKey || !openaiKey) {
         throw new Error('Missing required environment variables');
     }
 
     const supabase = createClient(supabaseUrl, supabaseKey);
-    const anthropic = new Anthropic({ apiKey: anthropicKey });
 
     // Test connection
     try {
@@ -554,7 +576,7 @@ async function runResearchOnlyPipeline(limit: number): Promise<PipelineResult> {
     let researched = 0;
 
     // Only run research stage (process scraped leads)
-    try { researched = await runResearchStage(supabase, anthropic, limit); }
+    try { researched = await runResearchStage(supabase, limit); }
     catch (error) {
         const msg = `Research: ${error instanceof Error ? error.message : String(error)}`;
         errors.push(msg);
@@ -612,7 +634,7 @@ function startScheduler(config: SchedulerConfig): void {
         try {
             logger.info(`Starting scheduled full pipeline run ${runNumber}/3...`);
             metrics.increment('pipelineRuns');
-            const result = await runPipeline(config.limit);
+            const result = await runPipeline(config.limit, runNumber);
             await sendSlackNotification(result, config);
             logSuccess(`Scheduled full pipeline run ${runNumber}/3 completed`);
         } catch (error) {
@@ -678,7 +700,7 @@ async function main(): Promise<void> {
         logger.info('Running pipeline once (--once flag)');
         try {
             metrics.increment('pipelineRuns');
-            const result = await runPipeline(config.limit);
+            const result = await runPipeline(config.limit, 1);
             await sendSlackNotification(result, config);
             process.exit(result.errors.length > 0 ? 1 : 0);
         } catch (error) {
