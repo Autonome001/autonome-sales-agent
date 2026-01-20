@@ -1,5 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { anthropicConfig, apifyConfig } from '../../config/index.js';
+import OpenAI from 'openai';
+import { openaiConfig, apifyConfig, config } from '../../config/index.js';
 import { leadsDb, eventsDb } from '../../db/index.js';
 import { googleSearch } from '../../tools/web-search.js';
 import { readUrlContent } from '../../tools/web-reader.js';
@@ -83,11 +83,11 @@ Output your analysis as JSON matching this structure:
 Be specific and actionable. The personalization hooks should feel like 1-to-1 communication.`;
 
 export class ResearchAgent {
-    private claude: Anthropic;
+    private openai: OpenAI;
 
     constructor() {
-        this.claude = new Anthropic({
-            apiKey: anthropicConfig.apiKey,
+        this.openai = new OpenAI({
+            apiKey: openaiConfig.apiKey,
         });
     }
 
@@ -130,43 +130,54 @@ export class ResearchAgent {
         logger.info(`🔬 Starting research for: ${lead.first_name} ${lead.last_name} (${lead.email})`);
 
         try {
-            // Scraping external market signals (G2, Trustpilot)
-            logger.info('Gathering external market signals...');
-            const companyName = lead.company_name || 'Unknown Company';
-
-            // Search for reviews
-            const [g2Results, trustpilotResults] = await Promise.all([
-                googleSearch(`${companyName} G2 reviews`),
-                googleSearch(`${companyName} Trustpilot reviews`)
-            ]);
-
-            // Filter to only actual review site URLs (ignore garbage results from free actors)
-            const isRelevantUrl = (url: string) => {
-                if (!url) return false;
-                const lower = url.toLowerCase();
-                return lower.includes('g2.com') ||
-                    lower.includes('trustpilot.com') ||
-                    lower.includes('capterra.com') ||
-                    lower.includes('glassdoor.com') ||
-                    lower.includes('linkedin.com') ||
-                    lower.includes(companyName.toLowerCase().replace(/\s+/g, ''));
-            };
-
-            const g2Url = g2Results.find(r => isRelevantUrl(r.url))?.url;
-            const trustpilotUrl = trustpilotResults.find(r => isRelevantUrl(r.url))?.url;
-            const relevantUrl = g2Url || trustpilotUrl;
             let reviewsText = '';
+            let relevantUrl = '';
 
-            if (relevantUrl) {
-                reviewsText = await readUrlContent(relevantUrl);
-                logger.info(`Extracted ${reviewsText.length} chars of review context from ${relevantUrl}`);
+            // Only perform web research if enabled in config
+            if (config.app.enableWebResearch) {
+                // Scraping external market signals (G2, Trustpilot)
+                logger.info('Gathering external market signals...');
+                const companyName = lead.company_name || 'Unknown Company';
+
+                // Search for reviews
+                const [g2Results, trustpilotResults] = await Promise.all([
+                    googleSearch(`${companyName} G2 reviews`),
+                    googleSearch(`${companyName} Trustpilot reviews`)
+                ]);
+
+                // Filter to only actual review site URLs (ignore garbage results from free actors)
+                const isRelevantUrl = (url: string) => {
+                    if (!url) return false;
+                    const lower = url.toLowerCase();
+                    return lower.includes('g2.com') ||
+                        lower.includes('trustpilot.com') ||
+                        lower.includes('capterra.com') ||
+                        lower.includes('glassdoor.com') ||
+                        lower.includes('linkedin.com') ||
+                        lower.includes(companyName.toLowerCase().replace(/\s+/g, ''));
+                };
+
+                const g2Url = g2Results.find(r => isRelevantUrl(r.url))?.url;
+                const trustpilotUrl = trustpilotResults.find(r => isRelevantUrl(r.url))?.url;
+                relevantUrl = g2Url || trustpilotUrl || '';
+
+                if (relevantUrl) {
+                    reviewsText = await readUrlContent(relevantUrl);
+                    logger.info(`Extracted ${reviewsText.length} chars of review context from ${relevantUrl}`);
+                } else {
+                    logger.warn('No direct review sites found, skipping deep review analysis');
+                }
             } else {
-                logger.warn('No direct review sites found, skipping deep review analysis');
+                logger.info('Skipping web research (disabled in config)');
             }
 
             // AI Analysis based on available data AND scraped reviews
             // Re-running analysis to include the new context
-            logger.info('Re-analyzing lead data with market signals...');
+            if (config.app.enableWebResearch) {
+                logger.info('Re-analyzing lead data with market signals...');
+            } else {
+                logger.info('Analyzing lead data...');
+            }
             const analysis = await this.analyzeResearch(lead, reviewsText);
 
             // Compile research data
@@ -264,28 +275,28 @@ export class ResearchAgent {
 ${reviewsContext ? reviewsContext.substring(0, 5000) : 'No external review data found.'}
 `;
 
-        const claude = this.claude;
+        const openai = this.openai;
 
         return withRetry(
             async () => {
-                const response = await claude.messages.create({
-                    model: 'claude-sonnet-4-20250514',
-                    max_tokens: 4096,
-                    system: ANALYSIS_SYSTEM_PROMPT,
+                const response = await openai.chat.completions.create({
+                    model: config.openai.model,
                     messages: [
+                        { role: 'system', content: ANALYSIS_SYSTEM_PROMPT },
                         {
                             role: 'user',
                             content: `Analyze this prospect and provide actionable insights for cold outreach:\n\n${researchContext}`,
                         },
                     ],
+                    response_format: { type: "json_object" },
                 });
 
-                const responseText = response.content[0].type === 'text' ? response.content[0].text : '';
+                const responseText = response.choices[0].message.content || '';
 
                 // Parse JSON response
                 const jsonMatch = responseText.match(/\{[\s\S]*\}/);
                 if (!jsonMatch) {
-                    throw new Error('No JSON found in Claude response');
+                    throw new Error('No JSON found in OpenAI response');
                 }
                 return JSON.parse(jsonMatch[0]) as ResearchAnalysis;
             },
@@ -294,7 +305,7 @@ ${reviewsContext ? reviewsContext.substring(0, 5000) : 'No external review data 
                 initialDelay: 2000,
                 maxDelay: 30000,
                 backoffMultiplier: 2,
-                operationName: 'Claude research analysis',
+                operationName: 'OpenAI research analysis',
                 isRetryable: (error) => {
                     const msg = error.message.toLowerCase();
                     // Retry on rate limits, overloaded, server errors, network issues
@@ -309,7 +320,7 @@ ${reviewsContext ? reviewsContext.substring(0, 5000) : 'No external review data 
                 },
             }
         ).catch(error => {
-            logger.warn('Failed to analyze with Claude after retries, using fallback', { metadata: error });
+            logger.warn('Failed to analyze with OpenAI after retries, using fallback', { metadata: error });
             return {
                 personalProfile: 'Analysis failed - see raw research data',
                 companyProfile: 'Analysis failed - see raw research data',

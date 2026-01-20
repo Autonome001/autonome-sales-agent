@@ -1,5 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { anthropicConfig } from '../../config/index.js';
+import OpenAI from 'openai';
+import { openaiConfig, config } from '../../config/index.js';
 import { PERSONAS } from '../../config/personas.js';
 import { leadsDb, eventsDb } from '../../db/index.js';
 import type { Lead, AgentResult } from '../../types/index.js';
@@ -98,13 +98,13 @@ OUTPUT FORMAT (JSON):
 }`;
 
 export class OutreachAgent {
-    private claude: Anthropic;
+    private openai: OpenAI;
     private config: OutreachConfig;
     private senderIndex: number = 0;
 
     constructor(config?: Partial<OutreachConfig>) {
-        this.claude = new Anthropic({
-            apiKey: anthropicConfig.apiKey,
+        this.openai = new OpenAI({
+            apiKey: openaiConfig.apiKey,
         });
 
         this.config = {
@@ -147,7 +147,7 @@ export class OutreachAgent {
             const context = this.buildEmailContext(lead, analysis);
 
             logger.info('Writing personalized emails...');
-            const sequence = await this.generateWithClaude(context);
+            const sequence = await this.generateWithOpenAI(context);
 
             const timezone = this.determineTimezone(lead);
             const senderEmail = this.getNextSender();
@@ -261,23 +261,25 @@ Refers to the company as "${shortCompany}" to sound natural (e.g. "I saw ${short
         return cleaned.trim();
     }
 
-    private async generateWithClaude(context: string): Promise<EmailSequence> {
-        const claude = this.claude;
+    private async generateWithOpenAI(context: string): Promise<EmailSequence> {
+        const openai = this.openai;
         const calendlyUrl = this.config.calendlyUrl;
 
         return withRetry(
             async () => {
-                const response = await claude.messages.create({
-                    model: 'claude-sonnet-4-20250514',
-                    max_tokens: 2048,
-                    system: EMAIL_SYSTEM_PROMPT,
-                    messages: [{ role: 'user', content: `Generate a 3-email cold outreach sequence for this prospect:\n\n${context}` }],
+                const response = await openai.chat.completions.create({
+                    model: config.openai.model,
+                    messages: [
+                        { role: 'system', content: EMAIL_SYSTEM_PROMPT },
+                        { role: 'user', content: `Generate a 3-email cold outreach sequence for this prospect:\n\n${context}` }
+                    ],
+                    response_format: { type: "json_object" },
                 });
 
-                const responseText = response.content[0].type === 'text' ? response.content[0].text : '';
+                const responseText = response.choices[0].message.content || '';
 
                 const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-                if (!jsonMatch) throw new Error('No JSON found in Claude response');
+                if (!jsonMatch) throw new Error('No JSON found in OpenAI response');
                 return JSON.parse(jsonMatch[0]) as EmailSequence;
             },
             {
@@ -285,7 +287,7 @@ Refers to the company as "${shortCompany}" to sound natural (e.g. "I saw ${short
                 initialDelay: 2000,
                 maxDelay: 30000,
                 backoffMultiplier: 2,
-                operationName: 'Claude email generation',
+                operationName: 'OpenAI email generation',
                 isRetryable: (error) => {
                     const msg = error.message.toLowerCase();
                     // Retry on rate limits, overloaded, server errors, network issues
@@ -300,7 +302,7 @@ Refers to the company as "${shortCompany}" to sound natural (e.g. "I saw ${short
                 },
             }
         ).catch(error => {
-            logger.warn('Failed to generate emails with Claude after retries, using fallback', { metadata: error });
+            logger.warn('Failed to generate emails with OpenAI after retries, using fallback', { metadata: error });
             return {
                 email1: { subject: 'Quick question', body: `Hi ${context.match(/Name: (\w+)/)?.[1] || 'there'},\n\nWorth a quick chat about automation?` },
                 email2: { body: 'Just bumping this up - would love to hear your thoughts.' },

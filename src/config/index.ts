@@ -12,9 +12,10 @@ const ConfigSchema = z.object({
     serviceRoleKey: z.string().min(1),
   }),
 
-  // Anthropic
-  anthropic: z.object({
+  // OpenAI - Replaces Anthropic
+  openai: z.object({
     apiKey: z.string().min(1),
+    model: z.string().default('gpt-4o-mini'),
   }),
 
   // Apollo.io (Legacy - kept for backward compatibility)
@@ -27,10 +28,7 @@ const ConfigSchema = z.object({
     apiToken: z.string().min(1),
   }),
 
-  // Optional OpenAI
-  openai: z.object({
-    apiKey: z.string().optional(),
-  }),
+
 
   // Slack (Optional but recommended)
   slack: z.object({
@@ -43,6 +41,7 @@ const ConfigSchema = z.object({
   app: z.object({
     nodeEnv: z.enum(['development', 'production', 'test']).default('development'),
     logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+    enableWebResearch: z.boolean().default(false),
   }),
 });
 
@@ -55,8 +54,9 @@ function loadConfig(): Config {
       anonKey: process.env.SUPABASE_ANON_KEY || '',
       serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
     },
-    anthropic: {
-      apiKey: process.env.ANTHROPIC_API_KEY || '',
+    openai: {
+      apiKey: process.env.OPENAI_API_KEY || '',
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
     },
     apollo: {
       apiKey: process.env.APOLLO_API_KEY || '',
@@ -64,9 +64,7 @@ function loadConfig(): Config {
     apify: {
       apiToken: process.env.APIFY_API_TOKEN,
     },
-    openai: {
-      apiKey: process.env.OPENAI_API_KEY,
-    },
+
     slack: {
       botToken: process.env.SLACK_BOT_TOKEN,
       signingSecret: process.env.SLACK_SIGNING_SECRET,
@@ -75,6 +73,7 @@ function loadConfig(): Config {
     app: {
       nodeEnv: process.env.NODE_ENV as 'development' | 'production' | 'test' || 'development',
       logLevel: process.env.LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error' || 'info',
+      enableWebResearch: process.env.ENABLE_WEB_RESEARCH === 'true',
     },
   };
 
@@ -95,7 +94,7 @@ export const config = loadConfig();
 // Export individual configs for convenience
 export const {
   supabase: supabaseConfig,
-  anthropic: anthropicConfig,
+  openai: openaiConfig,
   apollo: apolloConfig,
   apify: apifyConfig,
   slack: slackConfig
