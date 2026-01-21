@@ -513,14 +513,18 @@ async function runPipeline(limit: number, runNumber: number = 1): Promise<Pipeli
 ╚═══════════════════════════════════════════════════════════════╝
 `);
 
-    const supabaseUrl = process.env.SUPABASE_URL;
-    // Use service role key to bypass RLS - important for backend operations
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-    const openaiKey = process.env.OPENAI_API_KEY;
+    const missingVars = [];
+    if (!process.env.SUPABASE_URL) missingVars.push('SUPABASE_URL');
+    if (!(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY)) missingVars.push('SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY)');
+    if (!process.env.OPENAI_API_KEY) missingVars.push('OPENAI_API_KEY');
 
-    if (!supabaseUrl || !supabaseKey || !openaiKey) {
-        throw new Error('Missing required environment variables');
+    if (missingVars.length > 0) {
+        throw new Error(`Missing required environment variables: ${missingVars.join(', ')}`);
     }
+
+    const supabaseUrl = process.env.SUPABASE_URL!;
+    const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY)!;
+    const openaiKey = process.env.OPENAI_API_KEY!;
 
     const supabase = createClient(supabaseUrl, supabaseKey);
     // Agents initialize their own OpenAI clients using config
@@ -638,14 +642,18 @@ async function runResearchOnlyPipeline(limit: number, runNumber: number = 1): Pr
 ╚═══════════════════════════════════════════════════════════════╝
 `);
 
-    const supabaseUrl = process.env.SUPABASE_URL;
-    // Use service role key to bypass RLS - important for backend operations
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-    const openaiKey = process.env.OPENAI_API_KEY;
+    const missingVars = [];
+    if (!process.env.SUPABASE_URL) missingVars.push('SUPABASE_URL');
+    if (!(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY)) missingVars.push('SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY)');
+    if (!process.env.OPENAI_API_KEY) missingVars.push('OPENAI_API_KEY');
 
-    if (!supabaseUrl || !supabaseKey || !openaiKey) {
-        throw new Error('Missing required environment variables');
+    if (missingVars.length > 0) {
+        throw new Error(`Missing required environment variables: ${missingVars.join(', ')}`);
     }
+
+    const supabaseUrl = process.env.SUPABASE_URL!;
+    const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY)!;
+    const openaiKey = process.env.OPENAI_API_KEY!;
 
     const supabase = createClient(supabaseUrl, supabaseKey);
 
