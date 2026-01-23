@@ -335,6 +335,107 @@ app.post('/webhook/calendly', handleCalendlyWebhook);
 
 
 // ============================================================================
+// Resend Email Event Webhook (Bounces & Complaints)
+// ============================================================================
+
+async function updateLeadStatusFromEvent(email: string, eventType: string): Promise<void> {
+    const supabaseUrl = process.env.SUPABASE_URL;
+    // Prefer service role key for backend updates to bypass RLS if needed, fallback to anon
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+
+    if (!supabaseUrl || !supabaseKey) {
+        logger.error('Supabase credentials not configured for event update');
+        return;
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    let newStatus = '';
+    if (eventType === 'email.bounced') {
+        newStatus = 'bounced';
+    } else if (eventType === 'email.complained') {
+        newStatus = 'opted_out'; // Treat complaints as opt-outs to be safe
+    } else {
+        return; // Ignore other events
+    }
+
+    // Find lead first to confirm existence (optional but good for logging)
+    const { data: leads, error: findError } = await supabase
+        .from('leads')
+        .select('id, status')
+        .eq('email', email)
+        .limit(1);
+
+    if (findError || !leads || leads.length === 0) {
+        logger.warn(`Received ${eventType} for unknown email: ${email}`);
+        return;
+    }
+
+    const lead = leads[0];
+
+    // Update status
+    const { error } = await supabase
+        .from('leads')
+        .update({
+            status: newStatus,
+            updated_at: new Date().toISOString(),
+            // Store the raw event type in metadata or notes if we had a column, 
+            // but status change is the critical part.
+        })
+        .eq('id', lead.id);
+
+    if (error) {
+        logger.error(`Failed to update lead status for ${eventType}`, { metadata: error });
+    } else {
+        logSuccess(`Updated lead ${email} status from '${lead.status}' to '${newStatus}' (Event: ${eventType})`);
+
+        // Optional: Send Slack alert for bounces/complaints so user knows reputation impact
+        if (eventType === 'email.complained' && process.env.SLACK_WEBHOOK_URL) {
+            const message = {
+                blocks: [
+                    {
+                        type: 'section',
+                        text: {
+                            type: 'mrkdwn',
+                            text: `⚠️ *Spam Complaint Received* from ${email}. Lead marked as 'opted_out'.`
+                        }
+                    }
+                ]
+            };
+            fetch(process.env.SLACK_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(message)
+            }).catch(() => { });
+        }
+    }
+}
+
+app.post('/webhook/email-events', async (req, res) => {
+    try {
+        const { type, data } = req.body;
+
+        logger.info(`Received email event: ${type}`);
+
+        if (type === 'email.bounced' || type === 'email.complained') {
+            const recipients = data.to || [];
+
+            logger.info(`Processing ${type} for recipients: ${recipients.join(', ')}`);
+
+            for (const email of recipients) {
+                await updateLeadStatusFromEvent(email, type);
+            }
+        }
+
+        res.json({ success: true });
+    } catch (error) {
+        logger.error('Error processing email event webhook', { metadata: error });
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+
+// ============================================================================
 // Webhook Endpoint
 // ============================================================================
 
