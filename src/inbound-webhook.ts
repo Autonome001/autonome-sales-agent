@@ -285,6 +285,7 @@ async function updateLeadWithReply(
         .from('leads')
         .update({
             status: newStatus,
+            replied_at: new Date().toISOString(),
             last_reply_at: new Date().toISOString(),
             reply_category: classification.category,
             reply_sentiment: classification.sentiment,

@@ -28,14 +28,17 @@
     "inbound:server": "tsx src/inbound-webhook.ts",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
+    "report": "tsx src/scripts/generate-report.ts",
     "start:scheduler": "node dist/scheduler.js",
     "start:followups": "node dist/followup-scheduler.js --watch",
     "start:webhook": "node dist/inbound-webhook.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",
+    "date-fns": "^4.1.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "googleapis": "^170.1.0",
     "node-cron": "^4.2.1",
     "openai": "^6.16.0",
     "resend": "^4.0.1",

@@ -182,6 +182,7 @@ export async function handleGoogleCalendarWebhook(req: Request, res: Response) {
             // Update lead with video info if we have one
             if (lead) {
                 await leadsDb.update(lead.id, {
+                    meeting_booked_at: new Date().toISOString(),
                     meeting_scheduled_at: new Date().toISOString(),
                     // Store video ID if you have a column for it
                 });
