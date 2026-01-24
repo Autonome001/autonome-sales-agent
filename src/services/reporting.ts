@@ -139,6 +139,11 @@ export class ReportingService {
             return;
         }
 
+        const getTopValue = (data: Record<string, number>) => {
+            const top = Object.entries(data).sort((a, b) => b[1] - a[1])[0]?.[0] || 'N/A';
+            return this.cleanLabel(top);
+        };
+
         const blocks = [
             {
                 type: 'header',
@@ -164,9 +169,16 @@ export class ReportingService {
             },
             {
                 type: 'section',
+                fields: [
+                    { type: 'mrkdwn', text: `*Top Industry*\n${getTopValue(metrics.demographics.industries)}` },
+                    { type: 'mrkdwn', text: `*Top Region*\n${getTopValue(metrics.demographics.regions)}` }
+                ]
+            },
+            {
+                type: 'section',
                 text: {
                     type: 'mrkdwn',
-                    text: `*Top Industry:* ${Object.entries(metrics.demographics.industries).sort((a, b) => b[1] - a[1])[0]?.[0] || 'N/A'}`
+                    text: `*Top Seniority:* ${getTopValue(metrics.demographics.seniority)}`
                 }
             }
         ];
@@ -191,6 +203,15 @@ export class ReportingService {
     }
 
     /**
+     * Clean up labels that might be stored as stringified lists in DB
+     */
+    private cleanLabel(label: string): string {
+        if (!label) return 'Unknown';
+        // Remove brackets, quotes and trim
+        return label.replace(/[\[\]'"]/g, '').trim() || 'Unknown';
+    }
+
+    /**
      * Update Google Sheet (requires GOOGLE_SERVICE_ACCOUNT_JSON)
      */
     async updateGoogleSheet(metrics: WeeklyMetrics) {
@@ -199,6 +220,11 @@ export class ReportingService {
             logger.warn('Google Sheet reporting skipped: missing credentials or sheet ID');
             return;
         }
+
+        const getTopValue = (data: Record<string, number>) => {
+            const top = Object.entries(data).sort((a, b) => b[1] - a[1])[0]?.[0] || 'N/A';
+            return this.cleanLabel(top);
+        };
 
         const auth = new google.auth.GoogleAuth({
             credentials: JSON.parse(credentialsJson),
@@ -222,7 +248,10 @@ export class ReportingService {
             metrics.engagement.replyRate.toFixed(2) + '%',
             metrics.byStep.step1,
             metrics.byStep.step2,
-            metrics.byStep.step3
+            metrics.byStep.step3,
+            getTopValue(metrics.demographics.regions),
+            getTopValue(metrics.demographics.industries),
+            getTopValue(metrics.demographics.seniority)
         ];
 
         await sheets.spreadsheets.values.append({
