@@ -59,6 +59,14 @@ interface SchedulerConfig {
     enableSlack: boolean;
 }
 
+function isBusinessHour(timezone: string): boolean {
+    const now = new Date();
+    // Get hour in target timezone (0-23)
+    const hour = parseInt(now.toLocaleString("en-US", { timeZone: timezone, hour: 'numeric', hour12: false }));
+    // Business Hours: 9 AM to 6 PM (18:00)
+    return hour >= 9 && hour < 18;
+}
+
 function getSchedulerConfig(): SchedulerConfig {
     return {
         schedule: process.env.PIPELINE_SCHEDULE || '0 9 * * 1-6',           // Full pipeline at 9 AM (Mon-Sat)
@@ -542,7 +550,16 @@ async function runPipeline(limit: number, runNumber: number = 1): Promise<Pipeli
         return { discovered: 0, researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [msg], quarantineCount: 0, leadsWithErrors: 0 };
     }
 
-
+    // =====================================================================
+    // 🕒 BUSINESS HOURS GUARD
+    // =====================================================================
+    const config = getSchedulerConfig();
+    const isOverride = process.env.OVERRIDE_BUSINESS_HOURS === 'true';
+    if (!isBusinessHour(config.timezone) && !isOverride) {
+        const msg = `⛔ Skipping run: Outside business hours (${config.timezone})`;
+        logger.info(msg);
+        return { discovered: 0, researched: 0, emailsCreated: 0, emailsSent: 0, duration: 0, errors: [], quarantineCount: 0, leadsWithErrors: 0 };
+    }
 
     let discovered = 0, researched = 0, emailsCreated = 0, emailsSent = 0;
 
