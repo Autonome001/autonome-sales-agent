@@ -28,6 +28,13 @@ export interface ResearchAnalysis {
     uniqueFacts: string[];
     personalizationOpportunities: PersonalizationOpportunity[];
     painPoints: PainPoint[];
+    tbar: {
+        stage: 'try' | 'buy';
+        selected_needs: string[];
+        signposts: string[];
+        best_offer: string;
+        proof_angle: string;
+    };
 }
 
 export interface PersonalizationOpportunity {
@@ -66,6 +73,13 @@ Your analysis must include:
    - evidence: Why someone in this role likely has this pain
    - solution: How AI/automation services could address this
 
+7. **T-BAR Guidance**:
+   - stage: "try" | "buy" (for cold outbound default to "try")
+   - selected_needs: pick 2 to 3 needs for the stage that best match this prospect
+   - signposts: 2 to 4 concrete signpost ideas (examples, time saved, steps, risk reducers) that could be used in an email
+   - best_offer: one low-friction TRY offer (ex: 3-bullet plan, quick teardown, 10-min fit check)
+   - proof_angle: one BUY proof angle to use later (ex: credibility, similar client pattern, risk reduction approach)
+
 Output your analysis as JSON matching this structure:
 {
   "personalProfile": "string",
@@ -77,10 +91,17 @@ Output your analysis as JSON matching this structure:
   ],
   "painPoints": [
     { "pain": "string", "evidence": "string", "solution": "string" }
-  ]
+  ],
+  "tbar": {
+    "stage": "try",
+    "selected_needs": ["string"],
+    "signposts": ["string"],
+    "best_offer": "string",
+    "proof_angle": "string"
+  }
 }
 
-Be specific and actionable. The personalization hooks should feel like 1-to-1 communication.`;
+Be specific and grounded in the provided research data. The personalization hooks should feel like 1-to-1 communication.`;
 
 export class ResearchAgent {
     private openai: OpenAI;
@@ -328,6 +349,13 @@ ${reviewsContext ? reviewsContext.substring(0, 5000) : 'No external review data 
                 uniqueFacts: [],
                 personalizationOpportunities: [],
                 painPoints: [],
+                tbar: {
+                    stage: 'try',
+                    selected_needs: [],
+                    signposts: [],
+                    best_offer: '',
+                    proof_angle: ''
+                }
             };
         });
     }

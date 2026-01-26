@@ -50,31 +50,59 @@ const EMAIL_SYSTEM_PROMPT = `You are an expert B2B cold email copywriter for Aut
 
 CRITICAL RULES:
 1. Maximum 100 words per email body
-2. 6th grade reading level - simple, clear language
+2. 6th grade reading level, simple and clear language
 3. Subject lines: Maximum 4 words, intriguing but not clickbait
 4. NO fluff, NO corporate jargon, NO "I hope this finds you well"
 5. Every email must feel 1-to-1, not mass-generated
 6. Focus on THEIR pain points, not our features
+7. Use concrete signposts (specific numbers, time, steps, examples). Avoid vague claims.
+
+T-BAR MESSAGING (Try, Buy, Adopt, Refer):
+People say yes in stages. Each email must match the stage and only satisfy 2 to 3 needs for that stage.
+
+Stages:
+- TRY: smallest safe yes. Goal is relevance and low effort.
+- BUY: confidence to commit. Goal is proof, risk reduction, and a clear next step.
+- ADOPT: make success repeatable. Not used in cold outbound sequence.
+- REFER: make sharing safe and easy. Not used in cold outbound sequence.
+
+TRY needs (pick 2 to 3):
+Awareness, Problem, Simple Solution, Safety, Quick Outcome, Low Effort, Timing
+
+BUY needs (pick 2 to 3):
+Fit, Value, Risk, Trust, Emotion, Path, Urgency
+
+Stage mapping for this 3-email cold sequence:
+- Email 1 = TRY
+- Email 2 = TRY (short bump, reinforce with a different signpost)
+- Email 3 = BUY (more direct, includes Calendly link)
 
 EMAIL SEQUENCE STRUCTURE:
 
-**Email 1 (The Hook)**
-- Open with specific personalization (reference their LinkedIn post, company news, or unique fact)
-- Quickly transition to a pain point relevant to their role
-- End with soft CTA: "Worth a 15-min chat?"
-- NO Calendly link in first email
+Email 1 (The Hook) [TRY]
+- Open with specific personalization (from research hooks)
+- Name a pain point tied to their role
+- Include 1 to 2 concrete signposts that make this feel easy and safe
+- CTA must be low pressure and permission-based
+- Do NOT include Calendly link
 
-**Email 2 (The Bump)**
-- Short follow-up (50 words max)
+Allowed TRY CTAs (choose one):
+- "Worth a quick chat to see if this is relevant?"
+- "Open to a 10 min check to see if this fits?"
+- "Should I send a 3 bullet plan for how this would work?"
+
+Email 2 (The Bump) [TRY]
+- 50 words max
 - "Pushing this back up" angle
-- Reference the original email's value prop
-- Still no hard sell
+- Add one new signpost or a clearer example
+- Still low pressure, no Calendly link
 
-**Email 3 (The Close)**
-- Different pain point than Email 1
-- More direct approach
+Email 3 (The Close) [BUY]
+- Use a different pain point than Email 1
+- Include 2 to 3 BUY needs with proof-style signposts (risk, trust, path, value)
 - Include Calendly link
 - Create gentle urgency without being pushy
+- CTA can be direct because it is BUY stage
 
 TONE:
 - Conversational, like a knowledgeable peer
@@ -82,18 +110,23 @@ TONE:
 - Genuinely curious about their challenges
 - Zero desperation
 
-OUTPUT FORMAT (JSON):
+INPUTS YOU WILL RECEIVE:
+- Prospect name, role, company
+- Research outputs: personalization opportunities, pain points, and suggested solutions
+- T-BAR Analysis: stage guidance, selected needs, signposts, best offer
+
+OUTPUT FORMAT (JSON ONLY):
 {
   "email1": {
     "subject": "4 words max",
-    "body": "personalized opening... pain point... soft CTA"
+    "body": "100 words max"
   },
   "email2": {
-    "body": "short bump message"
+    "body": "50 words max"
   },
   "email3": {
     "subject": "4 words max",
-    "body": "different angle... calendly link... gentle close"
+    "body": "100 words max"
   }
 }`;
 
@@ -205,7 +238,13 @@ export class OutreachAgent {
         const interests = analysis.interests || [];
         const uniqueFacts = analysis.uniqueFacts || [];
 
+
         const shortCompany = this.cleanCompanyName(lead.company_name || '');
+
+        // T-BAR Context
+        const tbar = analysis.tbar || {};
+        const signposts = tbar.signposts || [];
+        const needs = tbar.selected_needs || [];
 
         return `
 ## PROSPECT INFORMATION
@@ -233,6 +272,15 @@ ${personalization.length ? personalization.map((p: any) => `- [${p.type}] ${p.ho
 
 ### Pain Points (USE DIFFERENT ONES FOR EMAIL 1 vs EMAIL 3)
 ${painPoints.length ? painPoints.map((p: any) => `- ${p.pain} → Solution: ${p.solution}`).join('\n') : 'None identified'}
+
+## T-BAR FRAMEWORK GUIDANCE
+- Stage: ${tbar.stage || 'try'}
+- Best Offer (Use in Email 1): ${tbar.best_offer || 'Quick chat'}
+- Proof Angle (Use in Email 3): ${tbar.proof_angle || 'Case study'}
+- Signposts to Use:
+${signposts.length ? signposts.map((s: string) => `- ${s}`).join('\n') : '- No specific signposts found'}
+- Buyer Needs to Hit:
+${needs.length ? needs.map((n: string) => `- ${n}`).join('\n') : '- Awareness, Problem, Low Effort'}
 
 ## CALENDLY LINK (for Email 3 only)
 ${this.config.calendlyUrl}
