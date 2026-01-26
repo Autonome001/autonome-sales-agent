@@ -460,7 +460,7 @@ export function startFollowupScheduler(): void {
     });
 
     // Schedule hourly runs with error handling
-    cron.schedule('0 * * * *', async () => {
+    cron.schedule('0 * * * 1-6', async () => {
         try {
             const result = await runFollowups();
             // Only send Slack notification if there was work to do (result !== null)

@@ -61,9 +61,9 @@ interface SchedulerConfig {
 
 function getSchedulerConfig(): SchedulerConfig {
     return {
-        schedule: process.env.PIPELINE_SCHEDULE || '0 9 * * *',           // Full pipeline at 9 AM
-        schedule2: process.env.PIPELINE_SCHEDULE_2 || '0 13 * * *',       // Full pipeline at 1 PM
-        schedule3: process.env.PIPELINE_SCHEDULE_3 || '0 17 * * *',       // Full pipeline at 5 PM
+        schedule: process.env.PIPELINE_SCHEDULE || '0 9 * * 1-6',           // Full pipeline at 9 AM (Mon-Sat)
+        schedule2: process.env.PIPELINE_SCHEDULE_2 || '0 13 * * 1-6',       // Full pipeline at 1 PM (Mon-Sat)
+        schedule3: process.env.PIPELINE_SCHEDULE_3 || '0 17 * * 1-6',       // Full pipeline at 5 PM (Mon-Sat)
         timezone: process.env.PIPELINE_TIMEZONE || 'America/New_York',
         limit: parseInt(process.env.PIPELINE_LIMIT || '300', 10),
         slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
