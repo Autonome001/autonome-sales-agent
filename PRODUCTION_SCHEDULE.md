@@ -23,7 +23,7 @@ The system is configured for **3 automated runs per day** with **300 leads per b
 ### Environment Variables
 ```bash
 # .env file
-PIPELINE_SCHEDULE=0 9,13,17 * * *  # Runs at 9 AM, 1 PM, 5 PM
+PIPELINE_SCHEDULE=0 9 * * 1-6  # Runs at 9 AM, 1 PM, 5 PM (Mon-Sat)
 PIPELINE_TIMEZONE=America/New_York
 PIPELINE_LIMIT=300
 ```
