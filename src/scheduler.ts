@@ -61,10 +61,22 @@ interface SchedulerConfig {
 
 function isBusinessHour(timezone: string): boolean {
     const now = new Date();
-    // Get hour in target timezone (0-23)
-    const hour = parseInt(now.toLocaleString("en-US", { timeZone: timezone, hour: 'numeric', hour12: false }));
-    // Business Hours: 9 AM to 6 PM (18:00)
-    return hour >= 9 && hour < 18;
+    // Get day and hour in target timezone
+    const day = parseInt(now.toLocaleString("en-US", { timeZone: timezone, weekday: 'numeric', hour12: false })); // Sunday is usually 1 in some locales, checking standard JS Day day
+    // Actually toLocaleString with weekday:'numeric' returns 1 (Monday) to 7 (Sunday) or something locale dependent. 
+    // To be safe, let's use getDay() on a TZ adjusted date object or just trust standard JS getDay() if timezone matches system.
+    // Better approach: use standard Date methods with timezone adjustment.
+
+    // Create date valid for target timezone
+    const tzDate = new Date(now.toLocaleString("en-US", { timeZone: timezone }));
+    const dayOfWeek = tzDate.getDay(); // 0 = Sunday, 1 = Monday, ...
+    const hour = tzDate.getHours();
+
+    // Block Sunday (0) strictly
+    if (dayOfWeek === 0) return false;
+
+    // Business Hours: 8 AM to 4 PM (16:00) - Strict window
+    return hour >= 8 && hour < 16;
 }
 
 function getSchedulerConfig(): SchedulerConfig {
@@ -498,9 +510,9 @@ async function runSendingStage(supabase: SupabaseClient, limit: number): Promise
             metrics.increment('errorsCaught');
         }
 
-        // Rate limiting: Resend allows 2 requests/second, so wait 600ms between emails
-        // This ensures we stay safely under the limit (500ms = exactly 2/sec, 600ms = safety margin)
-        await new Promise(resolve => setTimeout(resolve, 600));
+        // Rate limiting: Resend allows 2 requests/second, but we want to be very safe
+        // Increased to 1500ms to allow buffer for other processes and avoid 429 errors
+        await new Promise(resolve => setTimeout(resolve, 1500));
     }
 
     logSuccess(`Stage 3 Complete: ${sent} emails sent`);

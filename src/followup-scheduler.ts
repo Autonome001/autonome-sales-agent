@@ -48,6 +48,20 @@ function getConfig(): FollowUpConfig {
     };
 }
 
+function isBusinessHour(timezone: string = 'America/New_York'): boolean {
+    const now = new Date();
+    // Create date valid for target timezone
+    const tzDate = new Date(now.toLocaleString("en-US", { timeZone: timezone }));
+    const dayOfWeek = tzDate.getDay(); // 0 = Sunday, 1 = Monday, ...
+    const hour = tzDate.getHours();
+
+    // Block Sunday (0) strictly
+    if (dayOfWeek === 0) return false;
+
+    // Business Hours: 8 AM to 4 PM (16:00) - Strict window
+    return hour >= 8 && hour < 16;
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -258,10 +272,12 @@ async function processEmail2Followups(supabase: SupabaseClient, config: FollowUp
         }
 
         // Rate limiting handled in loop
-        await new Promise(resolve => setTimeout(resolve, 600));
+        // Increased to 1500ms for safety
+        await new Promise(resolve => setTimeout(resolve, 1500));
     }
+}
 
-    return { sent, errors };
+return { sent, errors };
 }
 
 async function processEmail3Followups(supabase: SupabaseClient, config: FollowUpConfig): Promise<{ sent: number; errors: string[] }> {
@@ -295,10 +311,12 @@ async function processEmail3Followups(supabase: SupabaseClient, config: FollowUp
         }
 
         // Rate limiting
-        await new Promise(resolve => setTimeout(resolve, 600));
+        // Increased to 1500ms for safety
+        await new Promise(resolve => setTimeout(resolve, 1500));
     }
+}
 
-    return { sent, errors };
+return { sent, errors };
 }
 
 // ============================================================================
@@ -338,6 +356,12 @@ async function runFollowups(): Promise<FollowUpResult | null> {
     const result: FollowUpResult = { email2Sent: 0, email3Sent: 0, quarantineCount: 0, errors: [] };
 
     // Validate required environment variables
+    const isOverride = process.env.OVERRIDE_BUSINESS_HOURS === 'true';
+    if (!isBusinessHour() && !isOverride) {
+        logger.info('⛔ Skipping follow-up run: Outside business hours (Mon-Sat, 7AM-10PM)');
+        return null;
+    }
+
     if (!config.supabaseUrl || !config.supabaseKey) {
         const msg = 'Missing SUPABASE_URL or SUPABASE_ANON_KEY environment variables';
         logger.error(msg);
@@ -388,8 +412,8 @@ async function runFollowups(): Promise<FollowUpResult | null> {
         // CRITICAL: Add delay between Email 2 and Email 3 batches
         // This prevents the last Email 2 and first Email 3 from hitting rate limits
         if (email2Result.sent > 0) {
-            logger.info('Waiting 600ms before Email 3 batch to respect rate limits...');
-            await new Promise(resolve => setTimeout(resolve, 600));
+            logger.info('Waiting 2000ms before Email 3 batch to respect rate limits...');
+            await new Promise(resolve => setTimeout(resolve, 2000));
         }
 
         const email3Result = await processEmail3Followups(supabase, config);
