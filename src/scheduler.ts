@@ -62,11 +62,6 @@ interface SchedulerConfig {
 function isBusinessHour(timezone: string): boolean {
     const now = new Date();
     // Get day and hour in target timezone
-    const day = parseInt(now.toLocaleString("en-US", { timeZone: timezone, weekday: 'numeric', hour12: false })); // Sunday is usually 1 in some locales, checking standard JS Day day
-    // Actually toLocaleString with weekday:'numeric' returns 1 (Monday) to 7 (Sunday) or something locale dependent. 
-    // To be safe, let's use getDay() on a TZ adjusted date object or just trust standard JS getDay() if timezone matches system.
-    // Better approach: use standard Date methods with timezone adjustment.
-
     // Create date valid for target timezone
     const tzDate = new Date(now.toLocaleString("en-US", { timeZone: timezone }));
     const dayOfWeek = tzDate.getDay(); // 0 = Sunday, 1 = Monday, ...

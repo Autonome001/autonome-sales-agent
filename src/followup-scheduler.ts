@@ -273,11 +273,9 @@ async function processEmail2Followups(supabase: SupabaseClient, config: FollowUp
 
         // Rate limiting handled in loop
         // Increased to 1500ms for safety
-        await new Promise(resolve => setTimeout(resolve, 1500));
     }
-}
 
-return { sent, errors };
+    return { sent, errors };
 }
 
 async function processEmail3Followups(supabase: SupabaseClient, config: FollowUpConfig): Promise<{ sent: number; errors: string[] }> {
@@ -312,11 +310,9 @@ async function processEmail3Followups(supabase: SupabaseClient, config: FollowUp
 
         // Rate limiting
         // Increased to 1500ms for safety
-        await new Promise(resolve => setTimeout(resolve, 1500));
     }
-}
 
-return { sent, errors };
+    return { sent, errors };
 }
 
 // ============================================================================
