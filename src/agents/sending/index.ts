@@ -115,7 +115,7 @@ export class SendingAgent {
                     subject: email.subject,
                     html: htmlBody,
                     text: textBody,
-                    replyTo: config.replyToEmail || config.defaultSenderEmail,
+                    replyTo: config.replyToEmail || fromEmail,
                 });
 
                 if (error) {
